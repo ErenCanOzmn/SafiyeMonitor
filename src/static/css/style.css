@@ -405,6 +405,34 @@ input:checked + .slider::before {
     box-shadow: 0 0 6px rgba(247,118,142,0.55);
 }
 
+.status-panel {
+    margin-top: auto;
+    padding: 16px;
+    border-top: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(0,0,0,0.12);
+}
+
+.status-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--text-tertiary);
+    box-shadow: 0 0 5px rgba(0,0,0,0.3);
+}
+
+.status-label {
+    display: block;
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-tertiary);
+    margin-bottom: 2px;
+}
+
 /* ── Main content ────────────────────────────────────────── */
 .main-content {
     flex: 1;
