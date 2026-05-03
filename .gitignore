@@ -1,0 +1,14 @@
+.claude/
+tests/
+__pycache__/
+*.log
+*.zip
+*.db
+*.sqlite
+.vscode/
+.idea/
+venv/
+.venv/
+build/
+dist/
+*.spec

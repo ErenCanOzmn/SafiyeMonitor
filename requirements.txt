@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+frida
+frida-tools
+jinja2
+requests
+pydantic
+urllib3
