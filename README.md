@@ -1,13 +1,11 @@
-# Safiye - Next-Gen Windows Thick Client Pentest Tool
+# Safiye - Next-Gen Thick Client Pentest Tool
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-brightgreen.svg)
 ![Frida](https://img.shields.io/badge/Frida-16.0%2B-orange.svg)
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)
 
-> **"Read the traffic, dump the memory, break the logic."**
-
-Safiye is a professional, all-in-one security analysis and reverse engineering platform designed specifically for Windows desktop applications (Thick Clients). Powered by the Frida instrumentation engine and a modern FastAPI web interface, Safiye allows you to intercept low-level API calls, manipulate network traffic in real-time, and perform deep memory analysis without ever touching a debugger.
+Safiye is a professional, all-in-one security analysis and reverse engineering platform designed specifically for desktop applications (Thick Clients). Powered by the Frida instrumentation engine and a modern FastAPI web interface, Safiye allows you to intercept low-level API calls, manipulate network traffic in real-time, and perform deep memory analysis without ever touching a debugger.
 
 ---
 
@@ -94,10 +92,6 @@ Safiye includes a first-of-its-kind Model Context Protocol (MCP) Server. This al
 
 ## Disclaimer
 Safiye is intended for legal security testing, educational purposes, and professional research only. The author is not responsible for any misuse or damage caused by this tool. Always obtain explicit permission before testing any software you do not own.
-
----
-
-**Eren Can Özmen**
 
 ---
 
