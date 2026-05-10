@@ -1,31 +1,31 @@
 :root {
-    --bg-dark:      #090b14;
-    --bg-base:      #0d1017;
-    --sidebar-bg:   #0d1017;
-    --bg-surface:   #111420;
-    --bg-raised:    #161928;
+    --bg-dark:      #0c0f1a;
+    --bg-base:      #111523;
+    --sidebar-bg:   #111523;
+    --bg-surface:   #161a2a;
+    --bg-raised:    #1c2035;
 
-    --text-primary:   #c9d1e0;
-    --text-secondary: #6b7899;
-    --text-tertiary:  #353d58;
-    --text-muted:     #353d58;
+    --text-primary:   #d8e0f0;
+    --text-secondary: #7d8db5;
+    --text-tertiary:  #424d6e;
+    --text-muted:     #424d6e;
 
-    --accent:        #7aa2f7;
-    --primary:       #7aa2f7;
-    --primary-dim:   rgba(122,162,247,0.07);
-    --primary-light: rgba(122,162,247,0.13);
-    --green:         #9ece6a;
-    --red:           #f7768e;
-    --yellow:        #e0af68;
-    --cyan:          #7aa2f7;
-    --pink:          #bb9af7;
+    --accent:        #89b4fa;
+    --primary:       #89b4fa;
+    --primary-dim:   rgba(137,180,250,0.08);
+    --primary-light: rgba(137,180,250,0.15);
+    --green:         #a6e3a1;
+    --red:           #f38ba8;
+    --yellow:        #f9e2af;
+    --cyan:          #89dceb;
+    --pink:          #cba6f7;
 
-    --border-subtle:  #111420;
-    --border-color:   #1b1f32;
-    --border-accent:  rgba(122,162,247,0.18);
+    --border-subtle:  #161a2a;
+    --border-color:   #242840;
+    --border-accent:  rgba(137,180,250,0.22);
 
-    --table-header:  #0b0d16;
-    --row-hover:     #0f1220;
+    --table-header:  #0e1220;
+    --row-hover:     #151929;
 
     --font-mono: 'Fira Code', monospace;
     --font-ui:   'Inter', sans-serif;
@@ -529,6 +529,33 @@ input:checked + .slider::before {
     transition: background 0.1s;
 }
 .data-table tbody tr:hover { background: var(--row-hover); }
+.data-table tbody tr.hist-selected {
+    background: rgba(122,162,247,0.10) !important;
+    border-left: 3px solid var(--primary);
+}
+
+/* History direction / endpoint cells */
+.hist-dir {
+    display: inline-block;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    margin-right: 5px;
+    font-family: var(--font-ui);
+}
+.hist-dir-out     { background: rgba(187,154,247,0.15); color: #bb9af7; }
+.hist-dir-in      { background: rgba(158,206,106,0.15); color: #9ece6a; }
+.hist-dir-connect { background: rgba(224,175,104,0.15); color: #e0af68; }
+.hist-method {
+    color: #7aa2f7;
+    font-weight: 700;
+    font-size: 0.75rem;
+    margin-right: 4px;
+}
+.hist-path       { color: var(--text-primary); }
+.hist-dest-inline { color: var(--text-tertiary); font-size: 0.75rem; }
 
 /* Status tags */
 .tag-success { color: var(--accent); }

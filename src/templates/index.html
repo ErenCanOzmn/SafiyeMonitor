@@ -8,7 +8,7 @@
     <link
         href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Inter:wght@400;500;600&display=swap"
         rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/style.css?v=4.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=4.2">
 </head>
 
 <body>
@@ -58,13 +58,27 @@
                 <div class="action-buttons" style="margin-top:8px;">
                     <button id="btnStop" class="btn btn-danger" disabled>Stop</button>
                 </div>
+                <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border-color); display:flex; flex-direction:column; gap:6px;">
+                    <div style="display:flex; gap:6px;">
+                        <button id="btnSaveHistory" class="btn btn-neutral" style="flex:1; font-size:0.74rem; padding:6px 4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="Save current session to a JSON file">
+                            💾 Save
+                        </button>
+                        <button id="btnLoadHistory" class="btn btn-neutral" style="flex:1; font-size:0.74rem; padding:6px 4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="Load a previously saved session JSON file">
+                            📂 Load
+                        </button>
+                    </div>
+                    <input type="file" id="loadHistoryInput" accept=".json" style="display:none;">
+                    <button id="btnNewSession" class="btn btn-neutral" style="width:100%; font-size:0.74rem; padding:6px 4px; opacity:0.65; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="Clear all captured data and start a new analysis session">
+                        New App
+                    </button>
+                </div>
             </div>
 
-            <div class="control-panel intercept-panel">
+            <div class="control-panel intercept-panel" style="display:none;">
                 <div class="intercept-header">
                     <label>RPC Trapping (Active Intercept)</label>
                     <label class="switch">
-                        <input type="checkbox" id="trapToggle" disabled>
+                        <input type="checkbox" id="trapToggle_OLD" disabled>
                         <span class="slider"></span>
                     </label>
                 </div>
@@ -89,27 +103,121 @@
                 <button class="tab-btn" data-target="tab-registry">Registry</button>
                 <button class="tab-btn" data-target="tab-memory">Memory</button>
                 <button class="tab-btn" data-target="tab-static">Strings</button>
-                <button class="tab-btn" data-target="tab-pipes">Pipes</button>
+                <button class="tab-btn" data-target="tab-sql">SQL Monitor <span id="sqlCountBadge" style="display:none; background:#e0af68; color:#0d1017; padding:0 6px; border-radius:10px; font-size:0.7rem; font-weight:700;">0</span></button>
                 <button class="tab-btn" data-target="tab-dll">DLL & Modules</button>
                 <button class="tab-btn" data-target="tab-pipelist" id="tabBtnPipelist">Pipelist</button>
+                <button class="tab-btn" data-target="tab-vulnerabilities" id="tabBtnVuln" style="background: rgba(255, 107, 107, 0.1); color: #ff6b6b; font-weight: 600;">Vulnerabilities <span id="vulnCountBadge" style="display:none; background:#ff6b6b; color:white; padding:0 6px; border-radius:10px; font-size:0.7rem;">0</span></button>
             </div>
 
             <div class="tab-container">
+                <!-- VULNERABILITIES TAB -->
+                <div id="tab-vulnerabilities" class="tab-content" style="overflow:hidden;">
+                    <!-- Toolbar -->
+                    <div style="flex-shrink:0; padding:12px 16px; background:var(--bg-surface); border-bottom:1px solid var(--border-color); display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                        <button id="btnAnalyzeAI" class="btn btn-primary" style="display:flex; align-items:center; gap:7px; font-weight:600;">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+                            Analyze with AI
+                        </button>
+                        <button id="btnAnalyzeRules" class="btn btn-neutral" style="display:flex; align-items:center; gap:7px; font-weight:600; border-color:#7aa2f7; color:#7aa2f7;">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                            Analyze without AI
+                        </button>
+                        <button id="btnClearVulns" class="btn btn-neutral" style="font-size:0.8rem;">Clear</button>
+                        <span id="vulnLastScan" style="font-size:0.78rem; color:var(--text-tertiary);"></span>
+                        <div style="margin-left:auto; display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                            <span id="vulnBadgeCrit" style="padding:3px 10px; border-radius:12px; font-size:0.72rem; font-weight:700; background:rgba(255,68,68,0.15); color:#ff4444; cursor:pointer;" data-sev="CRITICAL">0 Critical</span>
+                            <span id="vulnBadgeHigh" style="padding:3px 10px; border-radius:12px; font-size:0.72rem; font-weight:700; background:rgba(255,140,0,0.15); color:#ff8c00; cursor:pointer;" data-sev="HIGH">0 High</span>
+                            <span id="vulnBadgeMed"  style="padding:3px 10px; border-radius:12px; font-size:0.72rem; font-weight:700; background:rgba(224,175,104,0.15); color:#e0af68; cursor:pointer;" data-sev="MEDIUM">0 Medium</span>
+                            <span id="vulnBadgeLow"  style="padding:3px 10px; border-radius:12px; font-size:0.72rem; font-weight:700; background:rgba(158,206,106,0.15); color:#9ece6a; cursor:pointer;" data-sev="LOW">0 Low</span>
+                        </div>
+                    </div>
+                    <!-- Severity filter bar -->
+                    <div style="flex-shrink:0; padding:6px 16px; background:var(--bg-raised); border-bottom:1px solid var(--border-color); display:flex; gap:4px;">
+                        <button class="vuln-filter-btn active-filter" data-sev="ALL"      style="padding:3px 12px; border-radius:4px; border:1px solid var(--border-color); background:var(--primary-dim); color:var(--primary); font-size:0.78rem; cursor:pointer;">All</button>
+                        <button class="vuln-filter-btn" data-sev="CRITICAL" style="padding:3px 12px; border-radius:4px; border:1px solid var(--border-color); background:transparent; color:var(--text-secondary); font-size:0.78rem; cursor:pointer;">Critical</button>
+                        <button class="vuln-filter-btn" data-sev="HIGH"     style="padding:3px 12px; border-radius:4px; border:1px solid var(--border-color); background:transparent; color:var(--text-secondary); font-size:0.78rem; cursor:pointer;">High</button>
+                        <button class="vuln-filter-btn" data-sev="MEDIUM"   style="padding:3px 12px; border-radius:4px; border:1px solid var(--border-color); background:transparent; color:var(--text-secondary); font-size:0.78rem; cursor:pointer;">Medium</button>
+                        <button class="vuln-filter-btn" data-sev="LOW"      style="padding:3px 12px; border-radius:4px; border:1px solid var(--border-color); background:transparent; color:var(--text-secondary); font-size:0.78rem; cursor:pointer;">Low</button>
+                        <button class="vuln-filter-btn" data-sev="INFO"     style="padding:3px 12px; border-radius:4px; border:1px solid var(--border-color); background:transparent; color:var(--text-secondary); font-size:0.78rem; cursor:pointer;">Info</button>
+                    </div>
+                    <!-- Findings list -->
+                    <div id="vulnFindingsList" style="flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:12px;">
+                        <div id="vulnEmptyState" style="text-align:center; padding:60px 20px; color:var(--text-tertiary); display:flex; flex-direction:column; align-items:center; gap:12px;">
+                            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="opacity:0.4;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                            <div>
+                                <p style="font-size:0.9rem; margin-bottom:6px;">No vulnerability findings yet.</p>
+                                <p style="font-size:0.8rem;">Start the hook, collect traffic, then click <strong style="color:var(--primary);">Analyze with AI</strong> or <strong style="color:#7aa2f7;">Analyze without AI</strong>.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- AI Analysis log -->
+                    <div style="flex-shrink:0; height:110px; border-top:1px solid var(--border-color); display:flex; flex-direction:column;">
+                        <div style="padding:5px 14px; background:var(--bg-surface); font-size:0.68rem; font-weight:700; text-transform:uppercase; letter-spacing:1.5px; color:var(--text-tertiary); border-bottom:1px solid var(--border-color);">Analysis Log</div>
+                        <div id="vulnAnalysisLog" style="flex:1; overflow-y:auto; padding:6px 14px; font-family:var(--font-mono); font-size:0.76rem; color:var(--text-secondary); line-height:1.6;"></div>
+                    </div>
+                </div>
+
+                <style>
+                    .vuln-filter-btn.active-filter { background: var(--primary-dim) !important; color: var(--primary) !important; border-color: var(--primary) !important; }
+                    @keyframes borderPulse {
+                        0%   { box-shadow: 0 0 0px rgba(255,68,68,0); }
+                        50%  { box-shadow: 0 0 14px rgba(255,68,68,0.35); }
+                        100% { box-shadow: 0 0 0px rgba(255,68,68,0); }
+                    }
+                    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+                </style>
+
                 <!-- HISTORY TAB -->
-                <div id="tab-history" class="tab-content active">
-                    <table id="tblHistory" class="data-table">
-                        <thead>
-                            <tr>
-                                <th width="8%">ID</th>
-                                <th width="10%">Time</th>
-                                <th width="12%">Direction</th>
-                                <th width="12%">Protocol</th>
-                                <th width="10%">Size</th>
-                                <th>Destination IP:Port / Target</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
+                <div id="tab-history" class="tab-content active" style="overflow:hidden;">
+                    <!-- Toolbar -->
+                    <div style="flex-shrink:0; padding:7px 14px; background:var(--bg-surface); border-bottom:1px solid var(--border-color); display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--text-tertiary); flex-shrink:0;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                        <input id="historySearch" placeholder="Search destination, method, body..." style="background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:4px 9px; color:var(--text-primary); font-size:0.8rem; width:260px; outline:none;">
+                        <span style="font-size:0.72rem; color:var(--text-tertiary); flex-shrink:0;">Sort by:</span>
+                        <select id="historySortCol" style="background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:3px 7px; color:var(--text-primary); font-size:0.78rem; cursor:pointer; outline:none;">
+                            <option value="id">ID</option>
+                            <option value="size">Size</option>
+                            <option value="dest">Destination</option>
+                            <option value="endpoint">Endpoint</option>
+                        </select>
+                        <button id="historySortToggle" style="background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:3px 9px; color:var(--text-secondary); font-size:0.78rem; cursor:pointer;">▼ Desc</button>
+                        <span id="historyCount" style="font-size:0.73rem; color:var(--text-tertiary); margin-left:auto;">0 requests</span>
+                    </div>
+                    <!-- Table scroll area -->
+                    <div id="historyTableArea" style="flex:1; overflow-y:auto; min-height:0;">
+                        <table id="tblHistory" class="data-table" style="width:100%;">
+                            <thead>
+                                <tr>
+                                    <th width="6%" style="cursor:pointer;" data-hcol="id">ID</th>
+                                    <th width="9%">Time</th>
+                                    <th width="42%">Direction → Endpoint</th>
+                                    <th width="7%" style="cursor:pointer;" data-hcol="size">Size</th>
+                                    <th style="cursor:pointer;" data-hcol="dest">Destination IP:Port</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                    <!-- Detail panel -->
+                    <div id="historyDetailPanel" style="flex-shrink:0; height:215px; border-top:2px solid var(--primary); display:none; flex-direction:column; background:var(--bg-raised);">
+                        <div style="flex-shrink:0; padding:4px 12px; background:var(--bg-surface); border-bottom:1px solid var(--border-color); display:flex; align-items:center; gap:6px;">
+                            <span id="histDetailTitle" style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:0.8px; color:var(--primary); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Select a request to inspect</span>
+                            <button class="hist-vtab active-hvtab" data-hv="utf8" style="padding:2px 9px; border-radius:4px; border:1px solid var(--primary); background:var(--primary-dim); color:var(--primary); font-size:0.72rem; cursor:pointer;">UTF-8</button>
+                            <button class="hist-vtab" data-hv="hex" style="padding:2px 9px; border-radius:4px; border:1px solid var(--border-color); background:transparent; color:var(--text-secondary); font-size:0.72rem; cursor:pointer;">Hex</button>
+                            <button class="hist-vtab" data-hv="utf16" style="padding:2px 9px; border-radius:4px; border:1px solid var(--border-color); background:transparent; color:var(--text-secondary); font-size:0.72rem; cursor:pointer;">UTF-16</button>
+                            <div style="width:1px; height:16px; background:var(--border-color); margin:0 4px;"></div>
+                            <button id="histDetailSendRepeater" style="padding:2px 10px; border-radius:4px; border:1px solid var(--accent); background:rgba(158,206,106,0.1); color:var(--accent); font-size:0.72rem; font-weight:600; cursor:pointer; display:flex; align-items:center; gap:5px;">
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                                Send to Repeater
+                            </button>
+                            <button id="histDetailClose" style="padding:1px 7px; border-radius:4px; border:1px solid var(--border-color); background:transparent; color:var(--text-tertiary); font-size:1rem; cursor:pointer; margin-left:2px;" title="Close panel">✕</button>
+                        </div>
+                        <div style="flex:1; overflow-y:auto; padding:8px 14px;">
+                            <pre id="histDetUtf8"  style="margin:0; white-space:pre-wrap; word-break:break-all; font-family:var(--font-mono); font-size:0.77rem; color:var(--text-primary);"></pre>
+                            <pre id="histDetHex"   style="margin:0; white-space:pre-wrap; word-break:break-all; font-family:var(--font-mono); font-size:0.77rem; color:var(--text-primary); display:none;"></pre>
+                            <pre id="histDetUtf16" style="margin:0; white-space:pre-wrap; word-break:break-all; font-family:var(--font-mono); font-size:0.77rem; color:var(--text-primary); display:none;"></pre>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- INTERCEPT TAB -->
@@ -134,30 +242,32 @@
                                     <h3 style="display:flex; align-items:center; gap:8px;"><span
                                             class="pulse-red"></span>
                                         Intercept Details</h3>
-                                    <span id="interceptDestTitle"
-                                        style="color:var(--text-tertiary); font-family:var(--font-mono); font-size:0.85rem;">Waiting
-                                        for traffic...</span>
+                                    <div style="display:flex; align-items:center; gap:12px; margin: 4px 0;">
+                                        <span id="interceptDestTitle" style="color:var(--text-tertiary); font-family:var(--font-mono); font-size:0.85rem;">Waiting for traffic...</span>
+                                        <div style="display:flex; align-items:center; gap:8px; border-left: 1px solid var(--border-color); padding-left: 12px; margin-left: 4px;">
+                                            <label style="font-size:0.85rem; font-weight:600; color:var(--primary);">ACTIVATE INTERCEPT</label>
+                                            <label class="switch" style="transform: scale(0.8);">
+                                                <input type="checkbox" id="trapToggle">
+                                                <span class="slider"></span>
+                                            </label>
+                                        </div>
+                                    </div>
                                 </div>
                                 <div style="display:flex; gap:12px;">
-                                    <button id="interceptSendRepeaterBtn" class="btn btn-primary" disabled>Send to
+                                    <button id="interceptCopyCurlBtn" class="btn btn-neutral">Copy as cURL</button>
+                                    <button id="interceptSendRepeaterBtn" class="btn btn-primary">Send to
                                         Repeater</button>
-                                    <button id="interceptDropBtn" class="btn btn-danger" disabled>Drop Packet</button>
-                                    <button id="interceptForwardBtn" class="btn btn-success" disabled>Forward
+                                    <button id="interceptDropBtn" class="btn btn-danger">Drop Packet</button>
+                                    <button id="interceptForwardBtn" class="btn btn-success">Forward
                                         Packet</button>
                                 </div>
                             </div>
-                            <div style="flex:1; display:flex; gap:16px;">
-                                <div style="flex:1; display:flex; flex-direction:column; gap:8px;">
-                                    <label>HTTP Headers / Meta Info</label>
-                                    <textarea id="interceptHeadersArea" class="code-editor" style="flex:1; height:100%;"
-                                        spellcheck="false" disabled></textarea>
-                                </div>
-                                <div style="flex:1; display:flex; flex-direction:column; gap:8px;">
-                                    <label>Payload / Query Body</label>
-                                    <textarea id="interceptBodyArea" class="code-editor" style="flex:1; height:100%;"
-                                        spellcheck="false" disabled></textarea>
-                                </div>
+                            <div style="flex:1; display:flex; flex-direction:column; gap:8px;">
+                                <label>Request Editor (Headers + Payload)</label>
+                                <textarea id="interceptBodyArea" class="code-editor" style="flex:1; height:100%; font-family: 'Fira Code', monospace; line-height: 1.4;"
+                                    spellcheck="false" placeholder="Intercepted data will appear here..."></textarea>
                             </div>
+                            <textarea id="interceptHeadersArea" style="display:none;"></textarea>
                         </div>
                     </div>
                 </div>
@@ -181,6 +291,8 @@
                                         ID:</span>
                                     <input type="text" id="repeaterSocketId" style="width:100px; padding:6px;"
                                         placeholder="e.g. 192">
+                                    <button id="btnRepeaterCopyCurl" class="btn btn-neutral">Copy as cURL</button>
+                                    <button id="btnRepeaterSendCurl" class="btn btn-warning">Send as cURL</button>
                                     <button id="btnRepeaterSend" class="btn btn-primary">Send Request</button>
                                 </div>
                             </div>
@@ -330,21 +442,67 @@
                 </div>
 
                 <!-- PIPELIST TAB -->
-                <div id="tab-pipelist" class="tab-content">
-                    <div style="padding: 10px; display: flex; justify-content: space-between; align-items: center;">
-                        <h3>Windows Named Pipes</h3>
-                        <button id="btnRefreshPipes" class="btn btn-primary">Refresh List</button>
+                <!-- SQL MONITOR TAB -->
+                <div id="tab-sql" class="tab-content">
+                    <div style="flex-shrink:0; padding:10px 16px; background:var(--bg-surface); border-bottom:1px solid var(--border-color); display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                        <span style="font-size:0.85rem; font-weight:600; color:var(--text-primary);">SQL Monitor</span>
+                        <select id="sqlFilterType" style="padding:5px 8px; background:var(--bg-raised); border:1px solid var(--border-color); border-radius:4px; color:var(--text-primary); font-size:0.8rem;">
+                            <option value="ALL">All Types</option>
+                            <option value="SELECT">SELECT</option>
+                            <option value="INSERT">INSERT</option>
+                            <option value="UPDATE">UPDATE</option>
+                            <option value="DELETE">DELETE</option>
+                            <option value="DDL">DDL</option>
+                        </select>
+                        <select id="sqlFilterDriver" style="padding:5px 8px; background:var(--bg-raised); border:1px solid var(--border-color); border-radius:4px; color:var(--text-primary); font-size:0.8rem;">
+                            <option value="ALL">All Drivers</option>
+                        </select>
+                        <input type="text" id="sqlSearch" placeholder="Search queries..." style="padding:5px 10px; width:220px; background:var(--bg-raised); border:1px solid var(--border-color); border-radius:4px; color:var(--text-primary); font-size:0.8rem;">
+                        <span id="sqlCount" style="font-size:0.8rem; color:var(--text-secondary);">0 queries</span>
+                        <button id="btnClearSQL" class="btn btn-neutral" style="font-size:0.78rem; margin-left:auto;">Clear</button>
+                        <button id="btnExportSQL" class="btn btn-neutral" style="font-size:0.78rem; border-color:var(--primary); color:var(--primary);">Export CSV</button>
                     </div>
-                    <table id="tblPipelist" class="data-table">
-                        <thead>
-                            <tr>
-                                <th width="10%">Index</th>
-                                <th width="50%">Pipe Name</th>
-                                <th>Server PID</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
+                    <div style="flex-shrink:0; padding:6px 16px; background:rgba(250,183,135,0.08); border-bottom:1px solid rgba(250,183,135,0.2); display:flex; align-items:center; gap:8px;">
+                        <span style="font-size:0.72rem; color:#fab387;">&#9888; Under development — SQLite hooks functional; ODBC/TDS/SNI capture in progress.</span>
+                    </div>
+                    <div style="flex:1; overflow-y:auto;">
+                        <table id="tblSQL" class="data-table">
+                            <thead>
+                                <tr>
+                                    <th width="8%">Time</th>
+                                    <th width="8%">Type</th>
+                                    <th width="14%">Driver</th>
+                                    <th width="14%">API</th>
+                                    <th width="8%">Status</th>
+                                    <th>Query</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tblSQLBody">
+                                <tr id="sqlEmptyRow"><td colspan="6" style="text-align:center; color:var(--text-tertiary); padding:32px;">No SQL queries intercepted yet. Hook a process to start monitoring.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="tab-pipelist" class="tab-content">
+                    <div style="flex-shrink:0; padding:10px 16px; background:var(--bg-surface); border-bottom:1px solid var(--border-color); display:flex; align-items:center; gap:12px;">
+                        <span style="font-size:0.85rem; font-weight:600; color:var(--text-primary);">Windows Named Pipes</span>
+                        <span id="pipeCount" style="font-size:0.8rem; color:var(--text-secondary);">—</span>
+                        <button id="btnRefreshPipes" class="btn btn-primary" style="margin-left:auto; font-size:0.78rem;">Refresh</button>
+                    </div>
+                    <div style="flex:1; overflow-y:auto;">
+                        <table id="tblPipelist" class="data-table">
+                            <thead>
+                                <tr>
+                                    <th width="8%">#</th>
+                                    <th>Pipe Name</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tblPipelistBody">
+                                <tr id="pipeEmptyRow"><td colspan="2" style="text-align:center; color:var(--text-tertiary); padding:32px;">Click Refresh to list active named pipes on this system.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
 
@@ -393,13 +551,55 @@
         </div>
     </div>
 
+    <!-- AI Analysis Setup Modal -->
+    <div id="aiModal" style="display:none; position:fixed; inset:0; background:transparent; z-index:9999; align-items:center; justify-content:center; pointer-events:none;">
+        <div style="pointer-events:all; background:#1e2338; border:1px solid rgba(122,162,247,0.45); border-radius:12px; padding:28px 32px; max-width:560px; width:90%; box-shadow:0 12px 48px rgba(0,0,0,0.9), 0 0 0 1px rgba(122,162,247,0.1);">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:20px;">
+                <h3 style="margin:0; font-size:1rem; color:#e8ecf8; font-weight:700; letter-spacing:0.3px;">Start AI Analysis</h3>
+                <button id="aiModalClose" style="background:none; border:none; color:#7a82a0; cursor:pointer; font-size:1.2rem; line-height:1;">✕</button>
+            </div>
+
+            <!-- MCP Status -->
+            <div style="background:#141828; border:1px solid rgba(122,162,247,0.2); border-radius:8px; padding:11px 16px; margin-bottom:20px; display:flex; align-items:center; gap:10px;">
+                <span id="aiModalMcpDot" style="width:9px; height:9px; border-radius:50%; background:#555; flex-shrink:0;"></span>
+                <span id="aiModalMcpText" style="font-size:0.82rem; color:#a0aac4;">Checking MCP status...</span>
+            </div>
+
+            <!-- Steps -->
+            <div style="font-size:0.82rem; color:#b0bace; line-height:1.85; margin-bottom:20px;">
+                <div style="font-weight:600; color:#dde2f0; margin-bottom:10px; font-size:0.84rem;">Setup Steps</div>
+                <div style="display:flex; flex-direction:column; gap:8px;">
+                    <div><span style="color:#7aa2f7; font-weight:700;">1.</span> Make sure <code style="background:#0e1220; color:#9ece6a; padding:2px 6px; border-radius:3px; font-size:0.77rem;">mcp_server.py</code> is running — it must be active for AI to receive data</div>
+                    <div><span style="color:#7aa2f7; font-weight:700;">2.</span> Ensure the MCP server is registered in your AI — add it globally once:<br>
+                        <code style="background:#0e1220; color:#9ece6a; padding:3px 8px; border-radius:3px; font-size:0.74rem; display:inline-block; margin-top:5px; word-break:break-all;">claude mcp add safiye --scope user python "...Safiye\src\mcp_server.py"</code>
+                    </div>
+                    <div><span style="color:#7aa2f7; font-weight:700;">3.</span> Copy the prompt below and paste it into your Claude Code terminal</div>
+                    <div><span style="color:#7aa2f7; font-weight:700;">4.</span> Findings will stream automatically into the <strong style="color:#e8ecf8;">Vulnerabilities</strong> tab</div>
+                </div>
+            </div>
+
+            <!-- Prompt Box -->
+            <div style="margin-bottom:18px;">
+                <div style="font-weight:600; font-size:0.82rem; color:#dde2f0; margin-bottom:7px;">Prompt</div>
+                <div style="position:relative;">
+                    <textarea id="aiModalPrompt" readonly rows="5" style="width:100%; box-sizing:border-box; background:#0e1220; border:1px solid rgba(122,162,247,0.2); border-radius:6px; padding:10px 12px; font-size:0.76rem; font-family:var(--font-mono); color:#c9d1e0; resize:none; line-height:1.55;"></textarea>
+                    <button id="aiModalCopy" style="position:absolute; top:7px; right:7px; background:#7aa2f7; border:none; color:#0d1017; padding:4px 11px; border-radius:4px; font-size:0.72rem; cursor:pointer; font-weight:700;">Copy</button>
+                </div>
+            </div>
+
+            <div style="text-align:right;">
+                <button id="aiModalDone" class="btn btn-primary" style="font-size:0.83rem;">Done</button>
+            </div>
+        </div>
+    </div>
+
     <div id="contextMenu" class="context-menu">
         <ul>
             <li id="menuSendRepeater">Send to Repeater</li>
         </ul>
     </div>
 
-    <script src="/static/js/app.js?v=3.0"></script>
+    <script src="/static/js/app.js?v=11.6"></script>
 
     <!-- Pixel art walking Calico cat — Safiye Edition -->
     <style>
