@@ -1,11 +1,11 @@
-# Safiye — Thick Client Pentest & Runtime Analysis Platform
+# Safiye Thick Client Pentest & Runtime Analysis Platform
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-brightgreen.svg)
 ![Frida](https://img.shields.io/badge/Frida-16.0%2B-orange.svg)
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)
 
-Safiye is an all-in-one runtime security analysis platform for thick client applications on Windows. It combines Frida-based dynamic instrumentation with a browser-based interface, giving security researchers live visibility into network traffic, memory, system calls, and database queries — with no need for a traditional debugger.
+Safiye is an all-in-one runtime security analysis platform for thick client applications on Windows. It combines Frida-based dynamic instrumentation with a browser-based interface, giving security researchers live visibility into network traffic, memory, system calls, and database queries / with no need for a traditional debugger.
 
 ---
 
@@ -18,7 +18,7 @@ Safiye is an all-in-one runtime security analysis platform for thick client appl
 
 ---
 
-### Network Traffic — History Tab
+### Network Traffic / History Tab
 
 Every outgoing and incoming packet captured by the Frida hooks appears in the History tab in real time.
 
@@ -83,7 +83,7 @@ Replay any captured packet with modifications.
 
 ---
 
-### Memory Analysis — Memory Tab
+### Memory Analysis / Memory Tab
 
 - Dumps all readable memory regions of the running process on demand.
 - Extracts printable ASCII strings longer than a configurable threshold.
@@ -91,7 +91,7 @@ Replay any captured packet with modifications.
 
 ---
 
-### Static String Analysis — Strings Tab
+### Static String Analysis / Strings Tab
 
 - Scans binary and readable sections for hardcoded strings.
 - Applies pattern matching to identify API keys, passwords, connection strings, private keys, and IP addresses.
@@ -111,7 +111,7 @@ Replay any captured packet with modifications.
 
 ---
 
-### Named Pipes — Pipelist Tab
+### Named Pipes / Pipelist Tab
 
 - Lists all active Windows named pipes on the system on demand.
 - Displays full pipe paths (`\\.\pipe\<name>`).
@@ -130,13 +130,13 @@ Runs automatically in the background while hooking is active. Findings appear in
 
 ---
 
-## AI-Powered Analysis — MCP Integration
+## AI-Powered Analysis / MCP Integration
 
 Safiye includes a Model Context Protocol (MCP) server that connects an AI assistant directly to live pentest data inside the tool.
 
 ### What MCP enables
 
-Claude (or any MCP-compatible AI) can call Safiye's MCP tools to read captured data, analyze it for vulnerabilities, and write findings back into the Vulnerabilities tab — all from within a Claude Code session running alongside Safiye.
+Claude (or any MCP-compatible AI) can call Safiye's MCP tools to read captured data, analyze it for vulnerabilities, and write findings back into the Vulnerabilities tab / all from within a Claude Code session running alongside Safiye.
 
 ### Available MCP tools
 
@@ -184,7 +184,7 @@ hardcoded credentials, insecure deserialization, and SQL injection patterns.
 Submit any findings back to Safiye.
 ```
 
-Claude will call `get_capture_data`, reason over the results, and call `submit_findings` to populate the Vulnerabilities tab automatically. No API key or external service is required — Claude Code running locally handles everything. MCP connection status is shown live in the Safiye UI.
+Claude will call `get_capture_data`, reason over the results, and call `submit_findings` to populate the Vulnerabilities tab automatically. No API key or external service is required / Claude Code running locally handles everything. MCP connection status is shown live in the Safiye UI.
 
 ---
 
@@ -214,14 +214,14 @@ Navigate to `http://localhost:5000`.
 
 ```
 src/
-  safiye_server_prod.py   — FastAPI backend, WebSocket hub, Frida session manager
-  mcp_server.py           — MCP stdio bridge for AI assistant integration
-  templates/index.html    — Single-page UI
-  static/css/style.css    — UI stylesheet
-  static/js/app.js        — Frontend logic and WebSocket client
+  safiye_server_prod.py   / FastAPI backend, WebSocket hub, Frida session manager
+  mcp_server.py           / MCP stdio bridge for AI assistant integration
+  templates/index.html    / Single-page UI
+  static/css/style.css    / UI stylesheet
+  static/js/app.js        / Frontend logic and WebSocket client
 
 hooks/
-  safiye_frida_script.js  — Frida instrumentation script injected into the target process
+  safiye_frida_script.js  / Frida instrumentation script injected into the target process
 
 requirements.txt
 ```
