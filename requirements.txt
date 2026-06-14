@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+frida==16.6.4
+frida-tools>=13,<14
+jinja2
+requests
+pydantic
+urllib3
+anthropic
+mcp

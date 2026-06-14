@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.spec
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Local config with secrets
+safiye_config.json
+
+# Logs and runtime artifacts
+*.log
+*.zip
+*.db
+*.sqlite
+
+# Editor / IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Local README preview (not part of the project)
+preview.html
