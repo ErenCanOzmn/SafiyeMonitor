@@ -28,3 +28,16 @@ safiye_config.json
 
 # Local README preview (not part of the project)
 preview.html
+
+# Test executables and test source files
+test_*.exe
+test_*.cs
+test_*.py
+
+# Internal planning documents
+GELISTIRME_PLANI.txt
+
+# Windows compiled binaries
+*.exe
+*.dll
+*.pdb

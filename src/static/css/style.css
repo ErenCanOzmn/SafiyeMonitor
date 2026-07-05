@@ -445,12 +445,17 @@ input:checked + .slider::before {
 /* ── Tab bar ─────────────────────────────────────────────── */
 .tabs {
     display: flex;
+    flex-wrap: nowrap;
     background: var(--bg-surface);
     border-bottom: 1px solid var(--border-color);
     overflow-x: auto;
     flex-shrink: 0;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-color) transparent;
 }
-.tabs::-webkit-scrollbar { height: 0; }
+.tabs::-webkit-scrollbar { height: 3px; }
+.tabs::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 2px; }
+.tabs::-webkit-scrollbar-track { background: transparent; }
 
 .tab-btn {
     background: transparent;

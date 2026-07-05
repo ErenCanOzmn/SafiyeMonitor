@@ -4,12 +4,61 @@ document.addEventListener("DOMContentLoaded", () => {
     const btnAttach = document.getElementById("btnAttach");
     const btnStop = document.getElementById("btnStop");
     const btnBrowseExe = document.getElementById("btnBrowseExe");
-    const btnBrowseScript = document.getElementById("btnBrowseScript");
     const trapToggle = document.getElementById("trapToggle");
     const statusText = document.getElementById("statusText");
     const targetExeStr = document.getElementById("targetExe");
-    const fridaScriptStr = document.getElementById("fridaScript");
     const targetArgsStr = document.getElementById("targetArgs");
+
+    // ── Multi-script management ───────────────────────────────────────────────
+    function getScriptPaths() {
+        return Array.from(document.querySelectorAll(".script-input"))
+            .map(i => i.value.trim()).filter(Boolean);
+    }
+    function _updateRemoveBtns() {
+        const rows = document.querySelectorAll(".script-row");
+        rows.forEach(r => { const b = r.querySelector(".remove-script-btn"); if (b) b.disabled = rows.length <= 1; });
+    }
+    function addScriptRow(val) {
+        const c = document.getElementById("scriptsContainer");
+        if (!c) return;
+        const row = document.createElement("div");
+        row.className = "script-row";
+        row.style.cssText = "display:flex; gap:8px; margin-bottom:4px;";
+        const inp = document.createElement("input");
+        inp.type = "text"; inp.className = "script-input";
+        inp.placeholder = "path\\to\\script.js"; inp.style.flex = "1";
+        if (val) inp.value = val;
+        const bBtn = document.createElement("button");
+        bBtn.className = "btn btn-neutral browse-script-btn";
+        bBtn.style.cssText = "flex:0 0 auto; padding:8px 10px;";
+        bBtn.title = "Browse"; bBtn.textContent = "📂";
+        const rBtn = document.createElement("button");
+        rBtn.className = "btn btn-neutral remove-script-btn";
+        rBtn.style.cssText = "flex:0 0 auto; padding:8px 10px;";
+        rBtn.title = "Remove"; rBtn.textContent = "✕";
+        row.appendChild(inp); row.appendChild(bBtn); row.appendChild(rBtn);
+        c.appendChild(row);
+        _updateRemoveBtns();
+    }
+    addScriptRow("hooks\\safiye_frida_script.js");
+    const btnAddScript = document.getElementById("btnAddScript");
+    if (btnAddScript) btnAddScript.onclick = () => addScriptRow("");
+    const _scriptsContainer = document.getElementById("scriptsContainer");
+    if (_scriptsContainer) {
+        _scriptsContainer.addEventListener("click", async (e) => {
+            const row = e.target.closest(".script-row");
+            if (!row) return;
+            if (e.target.classList.contains("browse-script-btn")) {
+                const r = await fetch("/api/browse_file");
+                const d = await r.json();
+                if (d.path) row.querySelector(".script-input").value = d.path;
+            } else if (e.target.classList.contains("remove-script-btn")) {
+                if (document.querySelectorAll(".script-row").length > 1) {
+                    row.remove(); _updateRemoveBtns();
+                }
+            }
+        });
+    }
 
     const tblHistory = document.querySelector("#tblHistory tbody");
     const tblRegistry = document.querySelector("#tblRegistry tbody");
@@ -23,6 +72,81 @@ document.addEventListener("DOMContentLoaded", () => {
     const memoryStatus = document.getElementById("memoryStatus");
     const staticSearch = document.getElementById("staticSearch");
     const staticStatus = document.getElementById("staticStatus");
+
+    // ── Burp Bridge ───────────────────────────────────────────────────────────
+    const btnBridgeToggle  = document.getElementById("btnBridgeToggle");
+    const bridgeStatusDot  = document.getElementById("bridgeStatusDot");
+    const bridgeStatusText = document.getElementById("bridgeStatusText");
+    const bridgePortInput  = document.getElementById("bridgePort");
+    const burpPortInput    = document.getElementById("burpPort");
+    let _bridgeRunning = false;
+
+    function appendBridgeLog(text, isError) {
+        const log = document.getElementById("bridgeLog");
+        if (!log) return;
+        const ts = new Date().toTimeString().slice(0, 8);
+        const div = document.createElement("div");
+        div.style.cssText = "padding:1px 0; white-space:pre-wrap; word-break:break-all;"
+            + (isError ? " color:#ff6b6b;" : "");
+        div.textContent = ts + "  " + text;
+        log.appendChild(div);
+        while (log.children.length > 400) log.removeChild(log.firstChild);
+        log.scrollTop = log.scrollHeight;
+    }
+
+    const btnClearBridgeLog = document.getElementById("btnClearBridgeLog");
+    if (btnClearBridgeLog) {
+        btnClearBridgeLog.onclick = () => {
+            const log = document.getElementById("bridgeLog");
+            if (log) log.innerHTML = "";
+        };
+    }
+
+    function _setBridgeUI(running, msg) {
+        _bridgeRunning = running;
+        if (bridgeStatusDot)
+            bridgeStatusDot.style.background = running ? "#9ece6a" : "var(--text-tertiary)";
+        if (btnBridgeToggle) {
+            btnBridgeToggle.textContent = running ? "Stop Bridge" : "Start Bridge";
+            btnBridgeToggle.className   = running ? "btn btn-danger" : "btn btn-neutral";
+            btnBridgeToggle.style.cssText = "width:100%; font-size:0.78rem; padding:5px;";
+        }
+        if (bridgeStatusText && msg !== undefined)
+            bridgeStatusText.textContent = msg;
+    }
+
+    if (btnBridgeToggle) {
+        btnBridgeToggle.onclick = async () => {
+            if (_bridgeRunning) {
+                try {
+                    await fetch("/api/bridge/stop", { method: "POST" });
+                    _setBridgeUI(false, "Stopped.");
+                    appendBridgeLog("Bridge stopped.");
+                } catch (e) { showToast("Bridge stop failed: " + e, "error"); }
+            } else {
+                const bp  = parseInt(bridgePortInput?.value  || "8081");
+                const bup = parseInt(burpPortInput?.value    || "8080");
+                try {
+                    const r = await fetch("/api/bridge/start", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ bridge_port: bp, burp_port: bup })
+                    });
+                    const d = await r.json();
+                    if (d.status === "ok" || d.status === "already_running") {
+                        _setBridgeUI(true, `:${bp} → Burp :${bup}`);
+                        showToast("Bridge active on :" + bp, "success");
+                    } else {
+                        showToast("Bridge error: " + (d.message || d.status), "error");
+                        appendBridgeLog("Start failed: " + (d.message || d.status), true);
+                    }
+                } catch (e) {
+                    showToast("Bridge start failed: " + e, "error");
+                    appendBridgeLog("Start failed: " + e, true);
+                }
+            }
+        };
+    }
 
     let ws = null;
     let counters = { history: 0 };
@@ -46,6 +170,11 @@ document.addEventListener("DOMContentLoaded", () => {
         memoryStrings:   [],
         staticStrings:   []
     };
+
+    // Child Process Monitor state
+    let processEvents        = [];
+    let processSearchText    = "";
+    let processElevatedOnly  = false;
 
     // Vulnerability findings state
     let allVulnFindings = [];
@@ -654,74 +783,6 @@ document.addEventListener("DOMContentLoaded", () => {
         };
     }
 
-    // ── Intruder Logic ────────────────────────────────────────────────────────
-    const intruderSocketId   = document.getElementById("intruderSocketId");
-    const intruderTemplate   = document.getElementById("intruderTemplate");
-    const intruderPayloads   = document.getElementById("intruderPayloads");
-    const intruderFmtUtf8    = document.getElementById("intruderFmtUtf8");
-    const intruderFmtHex     = document.getElementById("intruderFmtHex");
-    const btnIntruderMark    = document.getElementById("btnIntruderMark");
-    const btnIntruderAttack  = document.getElementById("btnIntruderAttack");
-    const btnIntruderClear   = document.getElementById("btnIntruderClear");
-    const intruderResultsBody = document.getElementById("intruderResultsBody");
-    let intruderMode = "utf8";
-
-    function updateIntruderModeUI(mode) {
-        intruderFmtUtf8.className = "btn " + (mode === "utf8" ? "btn-primary" : "btn-neutral");
-        intruderFmtHex.className  = "btn " + (mode === "hex"  ? "btn-primary" : "btn-neutral");
-        intruderFmtUtf8.style.cssText = intruderFmtHex.style.cssText = "padding:2px 10px; font-size:0.8rem;";
-    }
-
-    if (intruderFmtUtf8) intruderFmtUtf8.onclick = () => { intruderMode = "utf8"; updateIntruderModeUI("utf8"); };
-    if (intruderFmtHex)  intruderFmtHex.onclick  = () => { intruderMode = "hex";  updateIntruderModeUI("hex"); };
-
-    if (btnIntruderMark) {
-        btnIntruderMark.onclick = () => {
-            if (!intruderTemplate) return;
-            const start = intruderTemplate.selectionStart;
-            const end   = intruderTemplate.selectionEnd;
-            const val   = intruderTemplate.value;
-            const selected = val.slice(start, end) || "payload";
-            intruderTemplate.value = val.slice(0, start) + "§" + selected + "§" + val.slice(end);
-            intruderTemplate.selectionStart = start;
-            intruderTemplate.selectionEnd   = start + selected.length + 2;
-            intruderTemplate.focus();
-        };
-    }
-
-    if (btnIntruderAttack) {
-        btnIntruderAttack.onclick = () => {
-            if (!ws) { alert("WebSocket is not connected."); return; }
-            const template = intruderTemplate ? intruderTemplate.value : "";
-            const rawPayloads = intruderPayloads ? intruderPayloads.value : "";
-            if (!template.includes("§payload§")) {
-                alert("No §payload§ marker found in the template. Use the 'Mark §payload§' button.");
-                return;
-            }
-            const payloads = rawPayloads.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-            if (!payloads.length) { alert("Payload list is empty."); return; }
-            const sid = intruderSocketId ? intruderSocketId.value.trim() : "";
-            if (!sid) { alert("Socket ID is required."); return; }
-            const statusEl = document.getElementById("intruderStatus");
-            if (statusEl) statusEl.textContent = "Starting attack...";
-            ws.send(JSON.stringify({
-                action: "intruder_attack",
-                socket: sid,
-                template,
-                payloads,
-                is_hex: intruderMode === "hex"
-            }));
-        };
-    }
-
-    if (btnIntruderClear) {
-        btnIntruderClear.onclick = () => {
-            if (intruderResultsBody) while (intruderResultsBody.firstChild) intruderResultsBody.removeChild(intruderResultsBody.firstChild);
-            const statusEl = document.getElementById("intruderStatus");
-            if (statusEl) statusEl.textContent = "";
-        };
-    }
-
     // ── History helpers ───────────────────────────────────────────────────────
 
     function parseHttpEndpoint(body) {
@@ -1067,32 +1128,29 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
             }
         }
-        else if (m.type === "intruder_status") {
-            const el = document.getElementById("intruderStatus");
-            if (el) el.textContent = m.message || "";
-        }
-        else if (m.type === "intruder_result") {
-            const tbody = document.getElementById("intruderResultsBody");
-            if (!tbody) return;
-            const tr = document.createElement("tr");
-            const pl = String(m.payload || "");
-            const status = String(m.status || "");
-            const isErr = status.startsWith("error");
-            tr.innerHTML = `<td>${(m.index ?? "") + 1}</td>` +
-                `<td style="font-family:var(--font-mono); font-size:0.8rem; word-break:break-all;">${escHtml(pl.length > 80 ? pl.slice(0,80)+"…" : pl)}</td>` +
-                `<td class="${isErr ? "tag-failed" : "tag-success"}" style="font-size:0.78rem;">${escHtml(status)}</td>` +
-                `<td style="font-size:0.78rem; color:var(--text-tertiary);">—</td>`;
-            tbody.appendChild(tr);
-            tr.scrollIntoView({ block: "nearest" });
-        }
         else if (m.type === "tcp_out" || m.type === "tcp_in") {
             sessionCapture.tcpPackets.push({ direction: m.direction, dest: m.dest, size: m.size, body: m.body, body_hex: m.body_hex });
             if (sessionCapture.tcpPackets.length > 500) sessionCapture.tcpPackets.shift();
             renderHistoryMsg(m);
         }
+        else if (m.type === "bridge_req") {
+            renderHistoryMsg(m);
+            const verb = m.method || (m.proto === "HTTPS" ? "CONNECT" : "HTTP");
+            const dest = m.proto === "HTTPS" ? m.dest : (m.url || m.dest || "");
+            appendBridgeLog(`#${m.req_id || "?"}  ${m.proto}  ${verb}  ${dest}`);
+        }
+        else if (m.type === "bridge_log") {
+            appendBridgeLog(m.text, m.isError);
+        }
         else if (m.type === "intercept_wait") {
             interceptQueue.push(m);
             updateInterceptUI();
+        }
+        else if (m.type === "process_spawn") {
+            processEvents.push(m);
+            if (processEvents.length > 500) processEvents.shift();
+            renderProcessRow(m);
+            if (m.elevated) flashTabBtn("tab-processes");
         }
         else if (m.type === "dll_monitor" || m.type === "registry_file_monitor") {
             if (m.type === "dll_monitor") {
@@ -1169,7 +1227,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     btnStart.onclick = () => {
         if (!targetExeStr.value) { showToast("Set a target executable first.", "error"); return; }
-        fetch("/api/start_hook", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({target_exe: targetExeStr.value, target_script: fridaScriptStr.value, target_args: targetArgsStr.value})})
+        const scripts = getScriptPaths();
+        if (!scripts.length) { showToast("Add at least one Frida script.", "error"); return; }
+        fetch("/api/start_hook", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({target_exe: targetExeStr.value, target_script: scripts[0], target_scripts: scripts, target_args: targetArgsStr.value})})
             .then(() => showToast("Spawning target and attaching hooks...", "info"))
             .catch(() => showToast("Failed to start hook.", "error"));
     };
@@ -1179,7 +1239,6 @@ document.addEventListener("DOMContentLoaded", () => {
             .catch(() => showToast("Failed to stop hook.", "error"));
     };
     btnBrowseExe.onclick = async () => { const r = await fetch("/api/browse_file"); const d = await r.json(); if (d.path) targetExeStr.value = d.path; };
-    btnBrowseScript.onclick = async () => { const r = await fetch("/api/browse_file"); const d = await r.json(); if (d.path) fridaScriptStr.value = d.path; };
 
     if (btnDumpMemory) {
         btnDumpMemory.onclick = () => {
@@ -1607,36 +1666,560 @@ document.addEventListener("DOMContentLoaded", () => {
         btnExportStatic.onclick = () => exportTableAsCSV("tblStatic", `safiye_static_${Date.now()}.csv`);
     }
 
-    const btnRefreshPipes = document.getElementById("btnRefreshPipes");
-    if (btnRefreshPipes) {
-        btnRefreshPipes.onclick = async () => {
-            btnRefreshPipes.disabled = true;
-            btnRefreshPipes.textContent = "Loading...";
+    // ── Named Pipe Tab ────────────────────────────────────────────────────────
+
+    let pipeData       = [];
+    let pipeFilter     = "ALL";
+    let pipeSearchText = "";
+    let activePipeId   = null;
+    let pipeRecvTimer  = null;
+    let pipeSendFmt    = "utf8";
+
+    // ── MSRPC helpers ─────────────────────────────────────────────────────────
+    const _NDR_UUID = [0x04,0x5d,0x88,0x8a,0xeb,0x1c,0xc9,0x11,0x9f,0xe8,0x08,0x00,0x2b,0x10,0x48,0x60];
+    const _MSRPC_UUIDS = {
+        epmapper: {uuid:[0x08,0x83,0xaf,0xe1,0x1f,0x5d,0xc9,0x11,0x91,0xa4,0x08,0x00,0x2b,0x14,0xa0,0xfa],ver:[3,0,0,0],label:"BIND - Endpoint Mapper v3"},
+        atsvc:    {uuid:[0x82,0x06,0xf7,0x1f,0x51,0x0a,0xe8,0x30,0x07,0x6d,0x74,0x0b,0xe8,0xce,0xe9,0x8b],ver:[1,0,0,0],label:"BIND - Task Scheduler v1"},
+        svcctl:   {uuid:[0x81,0xbb,0x7a,0x36,0x44,0x98,0xf1,0x35,0xad,0x32,0x98,0xf0,0x38,0x00,0x10,0x03],ver:[2,0,0,0],label:"BIND - Service Control v2"},
+        winreg:   {uuid:[0x01,0xd0,0x8c,0x33,0x44,0x22,0xf1,0x31,0xaa,0xaa,0x90,0x00,0x38,0x00,0x10,0x03],ver:[1,0,0,0],label:"BIND - Remote Registry v1"},
+        lsarpc:   {uuid:[0x78,0x57,0x34,0x12,0x34,0x12,0xcd,0xab,0xef,0x00,0x01,0x23,0x45,0x67,0x89,0xab],ver:[0,0,0,0],label:"BIND - LSA Policy v0"},
+        samr:     {uuid:[0x78,0x57,0x34,0x12,0x34,0x12,0xcd,0xab,0xef,0x00,0x01,0x23,0x45,0x67,0x89,0xac],ver:[1,0,0,0],label:"BIND - SAM Database v1"},
+        srvsvc:   {uuid:[0xc8,0x4f,0x32,0x4b,0x70,0x16,0xd3,0x01,0x12,0x78,0x5a,0x47,0xbf,0x6e,0xe1,0x88],ver:[3,0,0,0],label:"BIND - Server Service v3"},
+        wkssvc:   {uuid:[0x98,0xd0,0xff,0x6b,0x12,0xa1,0x10,0x36,0x98,0x33,0x46,0xc3,0xf8,0x7e,0x34,0x5a],ver:[1,0,0,0],label:"BIND - Workstation Service v1"},
+        spoolss:  {uuid:[0x78,0x56,0x34,0x12,0x34,0x12,0xcd,0xab,0xef,0x00,0x01,0x23,0x45,0x67,0x89,0xab],ver:[1,0,0,0],label:"BIND - Print Spooler v1"},
+        netlogon: {uuid:[0x78,0x56,0x34,0x12,0x34,0x12,0xcd,0xab,0xef,0x00,0x01,0x23,0x45,0x67,0xcf,0xfb],ver:[1,0,0,0],label:"BIND - Netlogon v1"},
+        eventlog: {uuid:[0xdc,0x3f,0x27,0x82,0x2a,0xe3,0xc3,0x18,0x3f,0x78,0x82,0x79,0x29,0xdc,0x23,0xea],ver:[0,0,0,0],label:"BIND - Event Log v0"},
+    };
+
+    function _buildMsrpcBind(uuidArr, verArr) {
+        const header = [0x05,0x00,0x0b,0x03,0x10,0x00,0x00,0x00,0x48,0x00,0x00,0x00,0x01,0x00,0x00,0x00];
+        const params = [0xd0,0x16,0xd0,0x16,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x01,0x00];
+        const all    = [...header, ...params, ...uuidArr, ...verArr, ..._NDR_UUID, 0x02,0x00,0x00,0x00];
+        const pairs  = all.map(b => b.toString(16).padStart(2,'0').toUpperCase());
+        const lines  = [];
+        for (let i = 0; i < pairs.length; i += 16) lines.push(pairs.slice(i,i+16).join(' '));
+        return lines.join('\n');
+    }
+
+    function _msrpcDecode(hexStr) {
+        const clean = (hexStr || "").replace(/\s+/g,"");
+        if (clean.length < 32) return null;
+        const b = [];
+        for (let i = 0; i < clean.length; i += 2) b.push(parseInt(clean.substr(i,2),16));
+        if (b[0] !== 5) return null;
+        const ptype   = b[2];
+        const fragLen = b[8] | (b[9]<<8);
+        const callId  = b[12] | (b[13]<<8) | (b[14]<<16) | (b[15]<<24);
+        const PTYPES  = {0x00:"REQUEST",0x02:"RESPONSE",0x03:"FAULT",
+                         0x0b:"BIND",0x0c:"BIND_ACK",0x0d:"BIND_NACK",
+                         0x10:"ALTER_CTX",0x11:"ALTER_CTX_RESP"};
+        if (ptype === 0x0c && b.length >= 26) {
+            const maxRecv    = b[18] | (b[19]<<8);
+            const secAddrLen = b[24] | (b[25]<<8);
+            let secAddr = "";
+            for (let i = 0; i < secAddrLen - 1 && 26+i < b.length; i++) {
+                const c = b[26+i]; if (c >= 32 && c < 127) secAddr += String.fromCharCode(c);
+            }
+            const padded = Math.ceil((26+secAddrLen)/4)*4;
+            let resultStr = "";
+            if (b.length >= padded+6) {
+                const res = b[padded+4] | (b[padded+5]<<8);
+                const R   = {0:"ACCEPTED",1:"USER_REJECT",2:"PROVIDER_REJECT",3:"NEGOTIATE_ACK"};
+                resultStr = "  result=" + (R[res] || res);
+            }
+            return `BIND_ACK  frag=${fragLen}  max_recv=${maxRecv}  pipe="${secAddr}"${resultStr}`;
+        }
+        if (ptype === 0x0d && b.length >= 18) {
+            const reason = b[16] | (b[17]<<8);
+            const R = {0:"not_specified",1:"temporary_congestion",2:"local_limit_exceeded",3:"protocol_version_not_supported"};
+            return `BIND_NACK  reason=${R[reason] || reason}`;
+        }
+        if (ptype === 0x03 && b.length >= 28) {
+            const st = ((b[27]<<24)|(b[26]<<16)|(b[25]<<8)|b[24]) >>> 0;
+            const F  = {0x1C000006:"access_denied",0x1C000008:"context_mismatch",0x00000005:"access_denied"};
+            return `FAULT  status=${F[st] || "0x"+st.toString(16).toUpperCase().padStart(8,"0")}`;
+        }
+        if (ptype === 0x02) return `RESPONSE  frag=${fragLen}  call_id=${callId}  stub=${Math.max(0,fragLen-24)} bytes`;
+        return `${PTYPES[ptype]||"TYPE_0x"+ptype.toString(16).toUpperCase()}  frag=${fragLen}  call_id=${callId}`;
+    }
+
+    function _pipeMatchesFilter(p) {
+        if (pipeFilter === "ACCESSIBLE"  && !p.accessible)  return false;
+        if (pipeFilter === "INTERESTING" && !p.interesting) return false;
+        if (pipeSearchText) {
+            const q = pipeSearchText.toLowerCase();
+            if (!(p.name   || "").toLowerCase().includes(q) &&
+                !(p.reason || "").toLowerCase().includes(q)) return false;
+        }
+        return true;
+    }
+
+    function _pipeRowBg(p) {
+        if (p.interesting && p.accessible)  return "rgba(255,107,107,0.13)";
+        if (p.interesting && !p.accessible) return "rgba(224,175,104,0.10)";
+        return "";
+    }
+
+    function _pipeAccessBadge(p) {
+        if (p.accessible === null || p.accessible === undefined)
+            return `<span style="color:var(--text-tertiary); font-size:0.75rem;">—</span>`;
+        if (p.accessible)
+            return `<span style="color:#9ece6a; font-size:0.75rem; font-weight:700;">YES</span>`;
+        return `<span style="color:var(--text-tertiary); font-size:0.75rem;">no</span>`;
+    }
+
+    function rebuildPipeTable() {
+        const tbody    = document.getElementById("tblPipelistBody");
+        const countEl  = document.getElementById("pipeCount");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+        const visible = pipeData.filter(_pipeMatchesFilter);
+        if (visible.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:var(--text-tertiary); padding:32px;">No pipes match the current filter.</td></tr>`;
+        } else {
+            visible.forEach((p, i) => {
+                const tr = document.createElement("tr");
+                tr.style.cssText = `background:${_pipeRowBg(p)}; cursor:pointer;`;
+                tr.dataset.pipeName = p.name;
+                tr.innerHTML = `
+                    <td style="color:var(--text-tertiary); font-size:0.75rem;">${i+1}</td>
+                    <td style="font-family:'Fira Code',monospace; font-size:0.78rem;">\\\\.\\pipe\\${escHtml(p.name)}</td>
+                    <td style="text-align:center;">${_pipeAccessBadge(p)}</td>
+                    <td style="font-size:0.75rem;">${_catBadge(p.category)}${escHtml(p.reason || "")}</td>`;
+                tr.onclick = () => openPipeClientPanel(p.name);
+                tbody.appendChild(tr);
+            });
+        }
+        if (countEl) countEl.textContent = `${visible.length} / ${pipeData.length} pipes`;
+    }
+
+    const _CAT_STYLE = {
+        CRED:   {bg:"rgba(247,118,142,0.18)", color:"#f7768e",   label:"CRED"},
+        EXEC:   {bg:"rgba(255,158,100,0.18)", color:"#ff9e64",   label:"EXEC"},
+        INFO:   {bg:"rgba(122,162,247,0.18)", color:"#7aa2f7",   label:"INFO"},
+        REG:    {bg:"rgba(187,154,247,0.18)", color:"#bb9af7",   label:"REG"},
+        CUSTOM: {bg:"rgba(158,206,106,0.18)", color:"#9ece6a",   label:"CUSTOM"},
+    };
+
+    function _catBadge(cat) {
+        if (!cat) return "";
+        const s = _CAT_STYLE[cat] || _CAT_STYLE.CUSTOM;
+        return `<span style="display:inline-block; padding:1px 6px; border-radius:3px; font-size:0.68rem; font-weight:700; background:${s.bg}; color:${s.color}; margin-right:5px;">${s.label}</span>`;
+    }
+
+    async function loadPipes(doScan) {
+        const scanStatus = document.getElementById("pipeScanStatus");
+        const btnList    = document.getElementById("btnListPipes");
+        const btnScan    = document.getElementById("btnScanPipes");
+        if (btnList) btnList.disabled = true;
+        if (btnScan) btnScan.disabled = true;
+        if (scanStatus) scanStatus.textContent = doScan ? "Scanning…" : "Loading…";
+        try {
+            if (doScan) {
+                const r = await fetch("/api/pipes/scan", {method:"POST"});
+                const d = await r.json();
+                pipeData = (d.pipes || []).map(p => ({
+                    name:        p.name,
+                    accessible:  p.accessible  ?? null,
+                    interesting: p.interesting ?? false,
+                    reason:      p.reason      || "",
+                    category:    p.category    || "",
+                    hint:        p.hint        || "",
+                }));
+            } else {
+                const r = await fetch("/api/pipes");
+                const d = await r.json();
+                pipeData = (d.pipes || []).map(p => ({
+                    name: p.name, accessible: null,
+                    interesting: false, reason: "", category: "", hint: "",
+                }));
+            }
+            rebuildPipeTable();
+            if (scanStatus) scanStatus.textContent = doScan ? "Scan done." : "";
+        } catch(e) {
+            console.error("Pipe load error:", e);
+            if (scanStatus) scanStatus.textContent = "Error!";
+        } finally {
+            if (btnList) btnList.disabled = false;
+            if (btnScan) btnScan.disabled = false;
+        }
+    }
+
+    // Pipe filter button toggles
+    document.querySelectorAll(".pipe-flt").forEach(btn => {
+        btn.onclick = () => {
+            pipeFilter = btn.dataset.pf;
+            document.querySelectorAll(".pipe-flt").forEach(b => {
+                b.style.background = b.dataset.pf === pipeFilter
+                    ? "var(--primary)" : "var(--bg-raised)";
+                b.style.color = b.dataset.pf === pipeFilter
+                    ? "#fff" : "var(--text-secondary)";
+            });
+            rebuildPipeTable();
+        };
+    });
+
+    const pipeSearchEl = document.getElementById("pipeSearch");
+    if (pipeSearchEl) pipeSearchEl.oninput = (e) => { pipeSearchText = e.target.value.trim(); rebuildPipeTable(); };
+
+    const btnListPipes = document.getElementById("btnListPipes");
+    if (btnListPipes) btnListPipes.onclick = () => loadPipes(false);
+
+    const btnScanPipes = document.getElementById("btnScanPipes");
+    if (btnScanPipes) btnScanPipes.onclick = () => loadPipes(true);
+
+    // ── Pipe Interactive Client ───────────────────────────────────────────────
+
+    async function openPipeClientPanel(pipeName) {
+        const panel = document.getElementById("pipeClientPanel");
+        const nameEl = document.getElementById("pipeClientName");
+        const recvArea = document.getElementById("pipeRecvArea");
+        if (!panel) return;
+        // Close any existing connection before switching pipes
+        if (activePipeId !== null) {
+            try { await fetch("/api/pipe/close", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({pipe_id: activePipeId})}); } catch(e) {}
+            activePipeId = null;
+            _stopRecvPoll();
+        }
+        panel.style.display = "flex";
+        panel.style.flexDirection = "column";
+        if (nameEl) nameEl.textContent = `\\\\.\\pipe\\${pipeName}`;
+        panel.dataset.targetPipe = pipeName;
+        if (recvArea) recvArea.innerHTML = "";
+        _updatePipeClientUI(false);
+
+        // Show pipe info hint in recv area header area
+        const pInfo = pipeData.find(p => p.name === pipeName);
+        const hintEl = document.getElementById("pipeHintBox");
+        if (hintEl) {
+            if (pInfo && pInfo.hint) {
+                const s = _CAT_STYLE[pInfo.category] || _CAT_STYLE.CUSTOM;
+                hintEl.innerHTML = `${_catBadge(pInfo.category)}<span style="color:var(--text-secondary); font-size:0.74rem;">${escHtml(pInfo.hint)}</span>`;
+                hintEl.style.display = "block";
+            } else {
+                hintEl.style.display = "none";
+            }
+        }
+    }
+
+    function _updatePipeClientUI(connected) {
+        const btnConn = document.getElementById("btnPipeConnect");
+        const btnSend = document.getElementById("btnPipeSend");
+        const statusEl = document.getElementById("pipeClientStatus");
+        if (btnConn) {
+            btnConn.textContent = connected ? "Disconnect" : "Connect";
+            btnConn.className   = connected ? "btn btn-danger" : "btn btn-success";
+        }
+        if (btnSend) btnSend.disabled = !connected;
+        if (statusEl) {
+            statusEl.textContent = connected ? "Connected" : "Disconnected";
+            statusEl.style.color = connected ? "#9ece6a" : "var(--text-tertiary)";
+        }
+    }
+
+    function _appendRecv(text, isHex, rawHex) {
+        const area = document.getElementById("pipeRecvArea");
+        if (!area) return;
+        if (rawHex) {
+            const decoded = _msrpcDecode(rawHex);
+            if (decoded) {
+                const badge = document.createElement("div");
+                badge.style.cssText = "padding:2px 6px; font-size:0.69rem; font-weight:700; color:#9ece6a; background:rgba(158,206,106,0.1); border-radius:3px; margin-bottom:2px; border:1px solid rgba(158,206,106,0.2); font-family:'Fira Code',monospace;";
+                badge.textContent = "MSRPC: " + decoded;
+                area.appendChild(badge);
+            }
+        }
+        const line = document.createElement("div");
+        line.style.cssText = "border-bottom:1px solid var(--border-color); padding:2px 0 4px; word-break:break-all; font-family:'Fira Code',monospace; font-size:0.75rem;";
+        line.style.color = isHex ? "#7dcfff" : "var(--text-primary)";
+        line.textContent = text;
+        area.appendChild(line);
+        area.scrollTop = area.scrollHeight;
+    }
+
+    function _stopRecvPoll() {
+        if (pipeRecvTimer) { clearInterval(pipeRecvTimer); pipeRecvTimer = null; }
+    }
+
+    function _startRecvPoll() {
+        _stopRecvPoll();
+        pipeRecvTimer = setInterval(async () => {
+            if (activePipeId === null) { _stopRecvPoll(); return; }
             try {
-                const res = await fetch("/api/pipes");
-                const data = await res.json();
-                const tbody = document.getElementById("tblPipelistBody");
-                const countEl = document.getElementById("pipeCount");
-                tbody.innerHTML = "";
-                const pipes = data.pipes || [];
-                if (pipes.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="2" style="text-align:center; color:var(--text-tertiary); padding:32px;">No named pipes found.</td></tr>';
-                } else {
-                    pipes.forEach(p => {
-                        const tr = document.createElement("tr");
-                        tr.innerHTML = `<td>${escHtml(p.index)}</td><td style="font-family:monospace; font-size:0.82rem;">\\\\.\\pipe\\${escHtml(p.name)}</td>`;
-                        tbody.appendChild(tr);
-                    });
+                const r = await fetch("/api/pipe/recv", {
+                    method: "POST",
+                    headers: {"Content-Type":"application/json"},
+                    body: JSON.stringify({pipe_id: activePipeId})
+                });
+                const d = await r.json();
+                if (d.bytes > 0) {
+                    const rawHex = d.data_hex || "";
+                    if (pipeSendFmt === "hex") {
+                        const hexStr = rawHex.match(/.{1,2}/g).join(" ");
+                        _appendRecv(hexStr, true, rawHex);
+                    } else {
+                        _appendRecv(d.data || "", false, rawHex);
+                    }
                 }
-                if (countEl) countEl.textContent = `${pipes.length} pipes`;
+            } catch(e) {}
+        }, 500);
+    }
+
+    const btnPipeConnect = document.getElementById("btnPipeConnect");
+    if (btnPipeConnect) {
+        btnPipeConnect.onclick = async () => {
+            const panel = document.getElementById("pipeClientPanel");
+            if (!panel) return;
+            const pipeName = panel.dataset.targetPipe;
+            if (activePipeId !== null) {
+                // disconnect
+                try { await fetch("/api/pipe/close", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({pipe_id: activePipeId})}); } catch(e) {}
+                activePipeId = null;
+                _stopRecvPoll();
+                _updatePipeClientUI(false);
+                return;
+            }
+            btnPipeConnect.disabled = true;
+            try {
+                const r = await fetch("/api/pipe/connect", {
+                    method: "POST",
+                    headers: {"Content-Type":"application/json"},
+                    body: JSON.stringify({name: pipeName})
+                });
+                const d = await r.json();
+                if (d.pipe_id !== undefined && d.pipe_id !== null) {
+                    activePipeId = d.pipe_id;
+                    _updatePipeClientUI(true);
+                    _startRecvPoll();
+                } else {
+                    const statusEl = document.getElementById("pipeClientStatus");
+                    if (statusEl) { statusEl.textContent = `Error: ${d.message || d.error || "connect failed"}`; statusEl.style.color="#f7768e"; }
+                }
             } catch(e) {
-                console.error("Pipes fetch error:", e);
+                console.error("Pipe connect error:", e);
             } finally {
-                btnRefreshPipes.disabled = false;
-                btnRefreshPipes.textContent = "Refresh";
+                btnPipeConnect.disabled = false;
             }
         };
     }
+
+    const btnPipeSend = document.getElementById("btnPipeSend");
+    if (btnPipeSend) {
+        btnPipeSend.onclick = async () => {
+            if (activePipeId === null) return;
+            const area = document.getElementById("pipeSendArea");
+            const raw = area ? area.value : "";
+            if (!raw) return;
+            const sendData = pipeSendFmt === "hex" ? raw.replace(/\s+/g, "") : raw;
+            btnPipeSend.disabled = true;
+            btnPipeSend.textContent = "Sending…";
+            try {
+                const r = await fetch("/api/pipe/send", {
+                    method: "POST",
+                    headers: {"Content-Type":"application/json"},
+                    body: JSON.stringify({pipe_id: activePipeId, data: sendData, fmt: pipeSendFmt})
+                });
+                const d = await r.json();
+                if (d.status === "ok") {
+                    btnPipeSend.textContent = "Sent ✓";
+                    setTimeout(() => { btnPipeSend.textContent = "Send"; btnPipeSend.disabled = false; }, 800);
+                } else {
+                    btnPipeSend.textContent = "Error";
+                    setTimeout(() => { btnPipeSend.textContent = "Send"; btnPipeSend.disabled = false; }, 1500);
+                }
+            } catch(e) {
+                console.error("Pipe send error:", e);
+                btnPipeSend.textContent = "Error";
+                setTimeout(() => { btnPipeSend.textContent = "Send"; btnPipeSend.disabled = false; }, 1500);
+            }
+        };
+    }
+
+    // Send format toggles — auto-convert textarea content on switch
+    const pipeFmtUtf8 = document.getElementById("pipeSendFmtUtf8");
+    const pipeFmtHex  = document.getElementById("pipeSendFmtHex");
+
+    function _setPipeFmt(fmt) {
+        if (fmt === pipeSendFmt) return;
+        const area = document.getElementById("pipeSendArea");
+        const val  = area ? area.value : "";
+        if (area && val.trim()) {
+            try {
+                if (fmt === "hex" && pipeSendFmt === "utf8") {
+                    // UTF-8 text → hex pairs
+                    const bytes = new TextEncoder().encode(val);
+                    area.value = Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join(" ");
+                } else if (fmt === "utf8" && pipeSendFmt === "hex") {
+                    // hex pairs → UTF-8 text
+                    const clean = val.replace(/\s+/g, "");
+                    const pairs = clean.match(/.{1,2}/g) || [];
+                    const bytes = new Uint8Array(pairs.map(h => parseInt(h, 16)));
+                    area.value  = new TextDecoder("utf-8", {fatal: false}).decode(bytes);
+                }
+            } catch(e) { /* leave textarea unchanged if conversion fails */ }
+        }
+        pipeSendFmt = fmt;
+        if (pipeFmtUtf8) { pipeFmtUtf8.className = fmt==="utf8" ? "btn btn-primary" : "btn btn-neutral"; }
+        if (pipeFmtHex)  { pipeFmtHex.className  = fmt==="hex"  ? "btn btn-primary" : "btn btn-neutral"; }
+    }
+    if (pipeFmtUtf8) pipeFmtUtf8.onclick = () => _setPipeFmt("utf8");
+    if (pipeFmtHex)  pipeFmtHex.onclick  = () => _setPipeFmt("hex");
+
+    // ── Templates dropdown ────────────────────────────────────────────────────
+    function _populateTemplates(currentPipeName) {
+        const dd = document.getElementById("pipeTemplateDropdown");
+        if (!dd) return;
+        dd.innerHTML = "";
+        const lower = (currentPipeName || "").toLowerCase();
+
+        // Header
+        const hdr = document.createElement("div");
+        hdr.style.cssText = "padding:4px 10px; font-size:0.68rem; font-weight:700; color:var(--text-tertiary); text-transform:uppercase; letter-spacing:0.6px;";
+        hdr.textContent = "MSRPC BIND Requests";
+        dd.appendChild(hdr);
+
+        Object.entries(_MSRPC_UUIDS).forEach(([key, def]) => {
+            const match = lower.includes(key);
+            const item = document.createElement("div");
+            item.style.cssText = `padding:5px 10px; font-size:0.78rem; cursor:pointer; display:flex; align-items:center; gap:6px; color:${match ? "var(--text-primary)" : "var(--text-secondary)"};`;
+            item.onmouseenter = () => item.style.background = "var(--bg-raised)";
+            item.onmouseleave = () => item.style.background = "";
+            if (match) {
+                const dot = document.createElement("span");
+                dot.textContent = "●";
+                dot.style.cssText = "color:#9ece6a; font-size:0.6rem; flex-shrink:0;";
+                item.appendChild(dot);
+            }
+            const lbl = document.createElement("span");
+            lbl.textContent = def.label;
+            item.appendChild(lbl);
+            item.onclick = () => {
+                const area = document.getElementById("pipeSendArea");
+                if (area) {
+                    area.value = _buildMsrpcBind(def.uuid, def.ver);
+                    _setPipeFmt("hex");
+                }
+                dd.style.display = "none";
+            };
+            dd.appendChild(item);
+        });
+    }
+
+    const btnPipeTemplates = document.getElementById("btnPipeTemplates");
+    if (btnPipeTemplates) {
+        btnPipeTemplates.onclick = (e) => {
+            e.stopPropagation();
+            const dd = document.getElementById("pipeTemplateDropdown");
+            if (!dd) return;
+            const panel = document.getElementById("pipeClientPanel");
+            const pipeName = panel ? (panel.dataset.targetPipe || "") : "";
+            _populateTemplates(pipeName);
+            dd.style.display = dd.style.display === "none" ? "block" : "none";
+        };
+    }
+    document.addEventListener("click", () => {
+        const dd = document.getElementById("pipeTemplateDropdown");
+        if (dd) dd.style.display = "none";
+    });
+
+    const btnPipeClearRecv = document.getElementById("btnPipeClearRecv");
+    if (btnPipeClearRecv) btnPipeClearRecv.onclick = () => {
+        const area = document.getElementById("pipeRecvArea");
+        if (area) area.innerHTML = "";
+    };
+
+    const pipeClientCloseBtn = document.getElementById("pipeClientCloseBtn");
+    if (pipeClientCloseBtn) pipeClientCloseBtn.onclick = async () => {
+        if (activePipeId !== null) {
+            try { await fetch("/api/pipe/close", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({pipe_id: activePipeId})}); } catch(e) {}
+            activePipeId = null;
+            _stopRecvPoll();
+        }
+        const panel = document.getElementById("pipeClientPanel");
+        if (panel) panel.style.display = "none";
+    };
+
+    // ── Child Process Monitor ─────────────────────────────────────────────────
+
+    function flashTabBtn(targetId) {
+        const btn = document.querySelector(`.tab-btn[data-target="${targetId}"]`);
+        if (!btn) return;
+        btn.style.transition = "background 0.15s";
+        btn.style.background = "rgba(255,107,107,0.35)";
+        setTimeout(() => { btn.style.background = ""; }, 1800);
+    }
+
+    function _processMatchesFilter(ev) {
+        if (processElevatedOnly && !ev.elevated) return false;
+        if (!processSearchText) return true;
+        const q = processSearchText.toLowerCase();
+        return (ev.exe   || "").toLowerCase().includes(q)
+            || (ev.args  || "").toLowerCase().includes(q)
+            || (ev.caller_mod || "").toLowerCase().includes(q)
+            || (ev.api   || "").toLowerCase().includes(q);
+    }
+
+    function renderProcessRow(ev) {
+        const tbody = document.getElementById("tblProcessesBody");
+        if (!tbody || !_processMatchesFilter(ev)) return;
+        const rowId = "proc-row-" + processEvents.indexOf(ev);
+        const tr = document.createElement("tr");
+        tr.id = rowId;
+        if (ev.elevated) tr.style.cssText = "background:rgba(255,107,107,0.10);";
+        const verbBadge = ev.verb
+            ? `<span style="margin-left:5px; padding:1px 5px; border-radius:3px; font-size:0.68rem; background:rgba(224,175,104,0.2); color:#e0af68;">${escHtml(ev.verb)}</span>`
+            : "";
+        tr.innerHTML = `
+            <td>${processEvents.length}</td>
+            <td>${escHtml(ev._ts || "")}</td>
+            <td><span style="font-size:0.74rem; padding:1px 5px; border-radius:3px; background:var(--bg-raised); color:var(--text-secondary);">${escHtml(ev.api || "")}</span></td>
+            <td style="font-family:var(--font-mono); font-size:0.77rem; word-break:break-all;">${escHtml(ev.exe || "")}</td>
+            <td style="font-family:var(--font-mono); font-size:0.77rem; word-break:break-all; color:var(--text-secondary);">${escHtml(ev.args || "")}${verbBadge}</td>
+            <td style="text-align:center;">${ev.elevated ? '<span style="color:#ff6b6b; font-weight:700;">🔴 YES</span>' : '<span style="color:var(--text-tertiary);">—</span>'}</td>
+            <td style="font-size:0.77rem; color:var(--text-tertiary);">${escHtml(ev.caller_mod || "")}</td>`;
+        tbody.appendChild(tr);
+        while (tbody.rows.length > 1000) tbody.deleteRow(0);
+        const countEl = document.getElementById("processCount");
+        if (countEl) countEl.textContent = processEvents.length + " processes";
+    }
+
+    function rebuildProcessTable() {
+        const tbody = document.getElementById("tblProcessesBody");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+        processEvents.forEach(ev => renderProcessRow(ev));
+        const countEl = document.getElementById("processCount");
+        if (countEl) countEl.textContent = processEvents.length + " processes";
+    }
+
+    const processSearchEl = document.getElementById("processSearch");
+    if (processSearchEl) {
+        processSearchEl.oninput = () => {
+            processSearchText = processSearchEl.value.trim();
+            rebuildProcessTable();
+        };
+    }
+
+    const processElevatedOnlyEl = document.getElementById("processElevatedOnly");
+    if (processElevatedOnlyEl) {
+        processElevatedOnlyEl.onchange = () => {
+            processElevatedOnly = processElevatedOnlyEl.checked;
+            rebuildProcessTable();
+        };
+    }
+
+    const btnClearProcesses = document.getElementById("btnClearProcesses");
+    if (btnClearProcesses) {
+        btnClearProcesses.onclick = () => {
+            processEvents = [];
+            const tbody = document.getElementById("tblProcessesBody");
+            if (tbody) tbody.innerHTML = "";
+            const countEl = document.getElementById("processCount");
+            if (countEl) countEl.textContent = "0 processes";
+        };
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     const btnNewSession = document.getElementById("btnNewSession");
     if (btnNewSession) {

@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from contextlib import asynccontextmanager
 
 # Configure logging to both file and console
@@ -35,6 +35,7 @@ logger = logging.getLogger("SafiyeServer")
 class State:
     frida_session = None
     frida_script = None
+    frida_scripts: list = None
     frida_device = None
     on_device_output_cb = None
     intercept_mode = False
@@ -46,12 +47,19 @@ class State:
     pending_analysis_data: dict = None
     session_events: list = None    # replayed to new WS clients
     session_snapshot: dict = None  # latest memory_dump / static_strings per type
+    bridge = None                  # SafiyeBridge instance
+    open_pipes: dict = None        # pipe_id → {"handle": int, "name": str}
+    _pipe_id_seq: int = 0
 
 state = State()
 state.session_events = []
 state.session_snapshot = {}
+state.frida_scripts = []
+state.bridge = None
+state.open_pipes = {}
+state._pipe_id_seq = 0
 
-_REPLAY_STREAM   = {"tcp_out", "tcp_in", "dll_monitor", "registry_file_monitor"}
+_REPLAY_STREAM   = {"tcp_out", "tcp_in", "dll_monitor", "registry_file_monitor", "bridge_req", "process_spawn"}
 _REPLAY_SNAPSHOT = {"memory_dump", "static_strings"}
 
 _RE_SQLI = re.compile(
@@ -347,6 +355,7 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 class HookRequest(BaseModel):
     target_exe: str
     target_script: str
+    target_scripts: Optional[List[str]] = None
     target_args: Optional[str] = ""
 
 def frida_on_message(message, data):
@@ -398,21 +407,16 @@ def frida_on_message(message, data):
         logger.error(f"[FRIDA ERROR] {message}")
         state.packet_queue.put({"type": "error", "message": str(message)})
 
-def frida_worker_thread(target_exe: str, target_script: str, args: str):
+def frida_worker_thread(target_exe: str, target_scripts: list, args: str):
     try:
         device = frida.get_local_device()
-        with open(target_script, "r", encoding="utf-8", errors="ignore") as f:
-            js_code = f.read()
         spawn_args = [target_exe]
         if args:
-            # shlex keeps quoted paths/arguments containing spaces intact.
             import shlex
             try:
                 spawn_args.extend(shlex.split(args, posix=False))
             except ValueError:
                 spawn_args.extend(args.split())
-        # Force UTF-8 in the spawned process so targets that print non-ASCII don't
-        # crash under the legacy cp1252 console code page.
         spawn_env = dict(os.environ)
         spawn_env["PYTHONUTF8"] = "1"
         spawn_env["PYTHONIOENCODING"] = "utf-8"
@@ -421,11 +425,17 @@ def frida_worker_thread(target_exe: str, target_script: str, args: str):
         except TypeError:
             pid = device.spawn(spawn_args)
         session = device.attach(pid)
-        script = session.create_script(js_code)
-        script.on("message", frida_on_message)
-        script.load()
+        loaded = []
+        for path in target_scripts:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                js_code = f.read()
+            s = session.create_script(js_code)
+            s.on("message", frida_on_message)
+            s.load()
+            loaded.append(s)
         state.frida_session = session
-        state.frida_script = script
+        state.frida_script = loaded[0]   # primary script — has rpc.exports
+        state.frida_scripts = loaded
         state.is_hooking = True
         device.resume(pid)
         state.packet_queue.put({"type": "status", "message": "Hook Active!"})
@@ -471,20 +481,216 @@ async def browse_file():
     p = await asyncio.to_thread(open_dialog)
     return {"path": p or ""}
 
+class BridgeStartRequest(BaseModel):
+    bridge_port: Optional[int] = 8081
+    burp_host:   Optional[str] = "127.0.0.1"
+    burp_port:   Optional[int] = 8080
+
+@app.post("/api/bridge/start")
+async def bridge_start(req: BridgeStartRequest):
+    from safiye_bridge import SafiyeBridge
+    if state.bridge and state.bridge.running:
+        return {"status": "already_running", "port": state.bridge.bridge_port}
+    bridge = SafiyeBridge(req.bridge_port, req.burp_host, req.burp_port, state.packet_queue.put)
+    try:
+        await bridge.start()
+        state.bridge = bridge
+        return {"status": "ok", "port": req.bridge_port}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/api/bridge/stop")
+async def bridge_stop():
+    if state.bridge and state.bridge.running:
+        await state.bridge.stop()
+    state.bridge = None
+    return {"status": "ok"}
+
+# ── Named Pipe Scanner & Interactive Client ──────────────────────────────────
+
+# (reason, category, interaction_hint)
+# category: CRED | EXEC | INFO | REG | CUSTOM
+_PIPE_KNOWN = {
+    "lsarpc":   ("LSASS RPC - credentials and security policies",
+                 "CRED",
+                 "MSRPC only. Does not execute commands. Used for hash dumps and LSA policy queries."),
+    "samr":     ("SAM Database - user/group enumeration, password hashes",
+                 "CRED",
+                 "MSRPC only. Does not execute commands. Enumerate local users and dump NTLM hashes."),
+    "netlogon": ("Domain authentication pipe - NTLM relay target",
+                 "CRED",
+                 "MSRPC only. Does not execute commands. Target for Zerologon (CVE-2020-1472) and NTLM relay."),
+    "lsass":    ("LSASS process pipe - credential store",
+                 "CRED",
+                 "Does not execute commands. Direct channel to LSASS for credential extraction."),
+    "spoolss":  ("Print Spooler - PrintNightmare CVE-2021-1675",
+                 "EXEC",
+                 "Code execution via malicious driver load running as SYSTEM. Requires RPC exploit, not plain text."),
+    "winspool": ("Print Spooler alt endpoint - PrintNightmare variant",
+                 "EXEC",
+                 "Same as spoolss. Secondary endpoint used in PrintNightmare chains."),
+    "svcctl":   ("Service Control Manager - service control",
+                 "EXEC",
+                 "Code execution possible: CreateService + StartService = SYSTEM shell. Requires MSRPC, not plain text."),
+    "atsvc":    ("Task Scheduler - scheduled task creation",
+                 "EXEC",
+                 "Code execution possible: create a task and trigger it to run as SYSTEM. Send MSRPC BIND first, then SchRpcRegisterTask."),
+    "epmapper": ("RPC Endpoint Mapper - enumerate all RPC interfaces",
+                 "INFO",
+                 "Does not execute commands. Lists every registered RPC service on the system."),
+    "ntsvcs":   ("Device Manager RPC - device and driver enumeration",
+                 "INFO",
+                 "Does not execute commands. Query installed devices and drivers."),
+    "scerpc":   ("Security Config Engine RPC - security policy",
+                 "INFO",
+                 "Does not execute commands. Query security configuration and audit settings."),
+    "wkssvc":   ("Workstation Service - domain info and session enumeration",
+                 "INFO",
+                 "Does not execute commands. Query active domain and logged-on user sessions."),
+    "srvsvc":   ("Server Service - share and connection enumeration",
+                 "INFO",
+                 "Does not execute commands. List network shares and active connections."),
+    "eventlog": ("Event Log - read and clear Windows event logs",
+                 "INFO",
+                 "Does not execute commands. Read or clear event logs remotely."),
+    "winreg":   ("Remote Registry - read and write registry hives",
+                 "REG",
+                 "Does not execute commands. Read or write registry keys remotely."),
+}
+_PIPE_NOISE = ("mojo.", "crashpad", "chrome.", "firefox.", "discord.", "slack.")
+
+def _scan_one_pipe(name: str) -> dict:
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    h = k32.CreateFileW(f"\\\\.\\pipe\\{name}", 0xC0000000, 3, None, 3, 0, None)
+    if h != -1:
+        k32.CloseHandle(h)
+        accessible, busy = True, False
+    else:
+        err = k32.GetLastError()
+        accessible = (err == 231)  # ERROR_PIPE_BUSY
+        busy = accessible
+    lower = name.lower()
+    interesting, reason, category, hint = False, "", "CUSTOM", ""
+    for key, (r, cat, h_txt) in _PIPE_KNOWN.items():
+        if key in lower:
+            interesting, reason, category, hint = True, r, cat, h_txt
+            break
+    if not interesting and accessible and not any(n in lower for n in _PIPE_NOISE):
+        interesting  = True
+        reason       = "App-specific IPC pipe"
+        category     = "CUSTOM"
+        hint         = "Unknown protocol. Try plain text first; if no response, switch to HEX mode and inspect binary traffic."
+    return {"name": name, "accessible": accessible, "busy": busy,
+            "interesting": interesting, "reason": reason,
+            "category": category, "hint": hint}
+
+@app.post("/api/pipes/scan")
+async def pipes_scan():
+    import os
+    try:
+        names = sorted(os.listdir(r"\\.\pipe\\"))
+    except Exception as e:
+        return {"pipes": [], "error": str(e)}
+    pipes = await asyncio.to_thread(lambda: [_scan_one_pipe(n) for n in names])
+    for i, p in enumerate(pipes, 1):
+        p["index"] = i
+    return {"pipes": pipes}
+
+class PipeConnectReq(BaseModel):
+    name: str
+
+class PipeSendReq(BaseModel):
+    pipe_id: str
+    data: str
+    fmt: str = "utf8"
+
+class PipeIdReq(BaseModel):
+    pipe_id: str
+
+@app.post("/api/pipe/connect")
+async def pipe_connect(req: PipeConnectReq):
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    path = req.name if req.name.startswith("\\\\") else f"\\\\.\\pipe\\{req.name}"
+    h = k32.CreateFileW(path, 0xC0000000, 3, None, 3, 0, None)
+    if h == -1:
+        err = k32.GetLastError()
+        return {"status": "error", "message": f"CreateFileW failed (error {err})"}
+    state._pipe_id_seq += 1
+    pid = f"pipe_{state._pipe_id_seq}"
+    state.open_pipes[pid] = {"handle": int(h), "name": req.name}
+    return {"status": "ok", "pipe_id": pid}
+
+@app.post("/api/pipe/send")
+async def pipe_send(req: PipeSendReq):
+    import ctypes
+    info = state.open_pipes.get(req.pipe_id)
+    if not info:
+        return {"status": "error", "message": "Not connected"}
+    try:
+        data = bytes.fromhex(req.data.replace(" ", "")) if req.fmt == "hex" else req.data.encode("utf-8", errors="replace")
+    except Exception as e:
+        return {"status": "error", "message": f"Data error: {e}"}
+    written = ctypes.c_ulong(0)
+    ok = ctypes.windll.kernel32.WriteFile(info["handle"], data, len(data), ctypes.byref(written), None)
+    if not ok:
+        return {"status": "error", "message": f"WriteFile failed (error {ctypes.windll.kernel32.GetLastError()})"}
+    return {"status": "ok", "bytes_written": written.value}
+
+@app.post("/api/pipe/recv")
+async def pipe_recv(req: PipeIdReq):
+    import ctypes
+    info = state.open_pipes.get(req.pipe_id)
+    if not info:
+        return {"status": "error", "message": "Not connected"}
+    k32 = ctypes.windll.kernel32
+    h = info["handle"]
+    avail = ctypes.c_ulong(0)
+    k32.PeekNamedPipe(h, None, 0, None, ctypes.byref(avail), None)
+    if avail.value == 0:
+        return {"status": "ok", "data": "", "data_hex": "", "bytes": 0}
+    buf = ctypes.create_string_buffer(min(avail.value, 65536))
+    read = ctypes.c_ulong(0)
+    k32.ReadFile(h, buf, len(buf), ctypes.byref(read), None)
+    raw = bytes(buf.raw[:read.value])
+    return {"status": "ok", "data": raw.decode("utf-8", errors="replace"),
+            "data_hex": raw.hex().upper(), "bytes": read.value}
+
+@app.post("/api/pipe/close")
+async def pipe_close(req: PipeIdReq):
+    import ctypes
+    info = state.open_pipes.pop(req.pipe_id, None)
+    if info:
+        try: ctypes.windll.kernel32.CloseHandle(info["handle"])
+        except: pass
+    return {"status": "ok"}
+
+@app.get("/api/bridge/status")
+async def bridge_status():
+    if state.bridge and state.bridge.running:
+        return {"running": True, "port": state.bridge.bridge_port,
+                "burp": f"{state.bridge.burp_host}:{state.bridge.burp_port}"}
+    return {"running": False}
+
 @app.post("/api/start_hook")
 async def start_hook(req: HookRequest):
     if state.is_hooking: return {"status": "error"}
-    threading.Thread(target=frida_worker_thread, args=(req.target_exe, req.target_script, req.target_args), daemon=True).start()
+    scripts = req.target_scripts if req.target_scripts else [req.target_script]
+    threading.Thread(target=frida_worker_thread, args=(req.target_exe, scripts, req.target_args), daemon=True).start()
     return {"status": "ok"}
 
 @app.post("/api/stop_hook")
 async def stop_hook():
     try:
-        if state.frida_script: state.frida_script.unload()
+        for s in (state.frida_scripts or ([state.frida_script] if state.frida_script else [])):
+            try: s.unload()
+            except: pass
         if state.frida_session: state.frida_session.detach()
     except: pass
     state.is_hooking = False
     state.frida_script = None
+    state.frida_scripts = []
     await broadcast_message({"type": "status", "message": "Hook Stopped."})
     return {"status": "ok"}
 
@@ -703,45 +909,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         "data": resp.decode("utf-8", errors="replace"),
                         "data_hex": resp.hex(),
                     })
-
-            elif action == "intruder_attack":
-                sid = str(cmd.get("socket", ""))
-                template = str(cmd.get("template", ""))
-                payloads = cmd.get("payloads", [])
-                is_hex = bool(cmd.get("is_hex", False))
-                if not payloads:
-                    await websocket.send_json({"type": "intruder_status", "message": "No payloads provided"})
-                elif not state.frida_script:
-                    await websocket.send_json({"type": "intruder_status", "message": "Frida not connected"})
-                else:
-                    await websocket.send_json({"type": "intruder_status", "message": f"Starting attack: {len(payloads)} payloads"})
-                    async def _run_intruder(sid=sid, template=template, payloads=payloads, is_hex=is_hex, ws=websocket):
-                        import asyncio as _aio
-                        loop = _aio.get_running_loop()
-                        for i, pl in enumerate(payloads[:500]):
-                            try:
-                                data = template.replace("§payload§", str(pl))
-                                res = await loop.run_in_executor(
-                                    None,
-                                    lambda d=data: state.frida_script.exports_sync.repeatersend(sid, d, is_hex)
-                                )
-                                await ws.send_json({
-                                    "type": "intruder_result",
-                                    "index": i,
-                                    "payload": pl,
-                                    "status": str(res)
-                                })
-                            except Exception as e:
-                                await ws.send_json({
-                                    "type": "intruder_result",
-                                    "index": i,
-                                    "payload": pl,
-                                    "status": f"error: {e}"
-                                })
-                            await _aio.sleep(0.05)
-                        await ws.send_json({"type": "intruder_status", "message": f"Attack complete: {len(payloads)} payloads sent"})
-                    import asyncio as _aio
-                    _aio.create_task(_run_intruder())
 
             elif action == "repeater_curl_send":
                 # Out-of-band HTTP request from the Repeater pane. Parses a raw HTTP

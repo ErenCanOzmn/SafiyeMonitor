@@ -841,4 +841,125 @@ function hookSSL() {
 hookSSL();
 setInterval(hookSSL, 5000);
 
+// ── CHILD PROCESS MONITOR ────────────────────────────────────────────────────
+// Hooks CreateProcessW/A and ShellExecuteW/ExW to capture every child process
+// the target spawns. elevated=true when the verb is "runas".
+
+function _procTs() {
+    var d = new Date();
+    return d.toTimeString().slice(0, 8) + "." + String(d.getMilliseconds()).padStart(3, "0");
+}
+
+function _callerMod(retAddr) {
+    try {
+        var m = Process.findModuleByAddress(retAddr);
+        return m ? m.name : "unknown";
+    } catch (e) { return "unknown"; }
+}
+
+function _emitSpawn(api, exe, cmdline, verb, elevated, caller) {
+    send({
+        type:       "process_spawn",
+        api:        api,
+        exe:        exe  || "",
+        args:       cmdline || "",
+        verb:       verb || null,
+        elevated:   elevated || false,
+        caller_mod: caller  || "unknown",
+        _ts:        _procTs()
+    });
+}
+
+(function () {
+    var p = Module.findExportByName("kernel32.dll", "CreateProcessW");
+    if (!p) return;
+    Interceptor.attach(p, {
+        onEnter: function (args) {
+            try {
+                var app = args[0].isNull() ? "" : args[0].readUtf16String();
+                var cmd = args[1].isNull() ? "" : args[1].readUtf16String();
+                this._exe    = app || (cmd ? cmd.split(" ")[0] : "");
+                this._args   = cmd;
+                this._caller = _callerMod(this.returnAddress);
+            } catch (e) {}
+        },
+        onLeave: function (retval) {
+            if (retval.toInt32() !== 0)
+                _emitSpawn("CreateProcessW", this._exe, this._args, null, false, this._caller);
+        }
+    });
+})();
+
+(function () {
+    var p = Module.findExportByName("kernel32.dll", "CreateProcessA");
+    if (!p) return;
+    Interceptor.attach(p, {
+        onEnter: function (args) {
+            try {
+                var app = args[0].isNull() ? "" : args[0].readAnsiString();
+                var cmd = args[1].isNull() ? "" : args[1].readAnsiString();
+                this._exe    = app || (cmd ? cmd.split(" ")[0] : "");
+                this._args   = cmd;
+                this._caller = _callerMod(this.returnAddress);
+            } catch (e) {}
+        },
+        onLeave: function (retval) {
+            if (retval.toInt32() !== 0)
+                _emitSpawn("CreateProcessA", this._exe, this._args, null, false, this._caller);
+        }
+    });
+})();
+
+(function () {
+    var p = Module.findExportByName("shell32.dll", "ShellExecuteW");
+    if (!p) return;
+    Interceptor.attach(p, {
+        onEnter: function (args) {
+            try {
+                this._verb   = args[1].isNull() ? "" : args[1].readUtf16String();
+                this._file   = args[2].isNull() ? "" : args[2].readUtf16String();
+                this._params = args[3].isNull() ? "" : args[3].readUtf16String();
+                this._caller = _callerMod(this.returnAddress);
+            } catch (e) {}
+        },
+        onLeave: function (retval) {
+            if (retval.toInt32() > 32) {
+                var elevated = (this._verb || "").toLowerCase() === "runas";
+                _emitSpawn("ShellExecuteW", this._file, this._params, this._verb, elevated, this._caller);
+            }
+        }
+    });
+})();
+
+(function () {
+    var p = Module.findExportByName("shell32.dll", "ShellExecuteExW");
+    if (!p) return;
+    var PS = Process.pointerSize;
+    // SHELLEXECUTEINFOW: cbSize(4)+fMask(4)+hwnd(PS) = 8+PS before lpVerb
+    var OFF_VERB   = 8 + PS;
+    var OFF_FILE   = 8 + PS * 2;
+    var OFF_PARAMS = 8 + PS * 3;
+    Interceptor.attach(p, {
+        onEnter: function (args) {
+            try {
+                var info = args[0];
+                if (info.isNull()) return;
+                var pV = info.add(OFF_VERB).readPointer();
+                var pF = info.add(OFF_FILE).readPointer();
+                var pP = info.add(OFF_PARAMS).readPointer();
+                this._verb   = pV.isNull() ? "" : pV.readUtf16String();
+                this._file   = pF.isNull() ? "" : pF.readUtf16String();
+                this._params = pP.isNull() ? "" : pP.readUtf16String();
+                this._caller = _callerMod(this.returnAddress);
+            } catch (e) {}
+        },
+        onLeave: function (retval) {
+            if (retval.toInt32() !== 0) {
+                var elevated = (this._verb || "").toLowerCase() === "runas";
+                _emitSpawn("ShellExecuteExW", this._file, this._params, this._verb, elevated, this._caller);
+            }
+        }
+    });
+})();
+
 console.log("[*] Safiye Frida Script loaded.");
