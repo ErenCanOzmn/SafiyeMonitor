@@ -1,4 +1,4 @@
 {
-  "_comment": "Copy this file to safiye_config.json and add your key, OR (preferred) set the ANTHROPIC_API_KEY environment variable, which takes precedence and keeps the key off disk. safiye_config.json is gitignored.",
+  "_comment": "Copy this file to safiye_config.json and add your key, OR (preferred) set the ANTHROPIC_API_KEY environment variable, which takes precedence and keeps the key off disk. safiye_config.json gitignored.",
   "api_key": ""
 }
