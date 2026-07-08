@@ -168,13 +168,22 @@ document.addEventListener("DOMContentLoaded", () => {
         registryEvents:  [],
         fileEvents:      [],
         memoryStrings:   [],
-        staticStrings:   []
+        staticStrings:   [],
+        cryptoEvents:    []
     };
 
     // Child Process Monitor state
     let processEvents        = [];
     let processSearchText    = "";
     let processElevatedOnly  = false;
+
+    // Crypto Monitor state
+    let cryptoSearchText     = "";
+    let cryptoSecretsOnly    = false;
+
+    // Function Faker state
+    let fakerRuleSeq = 0;
+    const fakerRules = {};   // id -> {id, module, symbol, offset, mode, value, hits, addr}
 
     // Vulnerability findings state
     let allVulnFindings = [];
@@ -1039,11 +1048,16 @@ document.addEventListener("DOMContentLoaded", () => {
         sessionCapture.fileEvents = [];
         sessionCapture.memoryStrings = [];
         sessionCapture.staticStrings = [];
+        sessionCapture.cryptoEvents = [];
 
         // Monitor tables
         [tblRegistry, tblFile, tblDll, tblMemory, tblStatic].forEach(t => {
             if (t) while (t.firstChild) t.removeChild(t.firstChild);
         });
+        const cTbody = document.getElementById("tblCryptoBody");
+        if (cTbody) cTbody.innerHTML = "";
+        const cCount = document.getElementById("cryptoCount");
+        if (cCount) cCount.textContent = "0 events";
 
         // Memory / Strings
         fullMemoryResults = [];
@@ -1151,6 +1165,74 @@ document.addEventListener("DOMContentLoaded", () => {
             if (processEvents.length > 500) processEvents.shift();
             renderProcessRow(m);
             if (m.elevated) flashTabBtn("tab-processes");
+        }
+        else if (m.type === "crypto_event") {
+            const ev = {
+                api: m.api, op: m.op, size: m.size, ts: m._ts || getTimeString(),
+                body: m.body || "", body_hex: m.body_hex || "",
+                dpapi_local_machine: !!m.dpapi_local_machine,
+                dpapi_entropy: m.dpapi_entropy
+            };
+            sessionCapture.cryptoEvents.push(ev);
+            if (sessionCapture.cryptoEvents.length > 500) sessionCapture.cryptoEvents.shift();
+            renderCryptoRow(ev);
+            if (ev.op === "unprotect" || ev.op === "decrypt") flashTabBtn("tab-crypto");
+        }
+        else if (m.type === "faker_result") {
+            const st = document.getElementById("fakerStatus");
+            if (m.op === "add") {
+                const okAdd = typeof m.result === "string" && m.result.indexOf("ok") === 0;
+                if (okAdd) {
+                    fakerRules[m.id] = { id: m.id, module: m.module, symbol: m.symbol, offset: m.offset, mode: m.mode, value: m.value, hits: 0, addr: m.result.slice(3) };
+                    renderFakerRules();
+                    if (st) { st.textContent = "hooked " + (m.symbol || (m.module + "+" + m.offset)) + " @ " + m.result.slice(3); st.style.color = "#9ece6a"; }
+                } else if (st) { st.textContent = "failed: " + (m.result || "unknown"); st.style.color = "#ff6b6b"; }
+            } else if (m.op === "remove") {
+                delete fakerRules[m.id];
+                renderFakerRules();
+                if (st) { st.textContent = "removed"; st.style.color = "var(--text-tertiary)"; }
+            }
+        }
+        else if (m.type === "faker_list") {
+            Object.keys(fakerRules).forEach(k => delete fakerRules[k]);
+            (m.rules || []).forEach(r => { fakerRules[r.id] = r; });
+            renderFakerRules();
+        }
+        else if (m.type === "faker_search") {
+            const box = document.getElementById("fakerSearchBox");
+            if (box) {
+                const results = m.results || [];
+                if (!results.length) {
+                    box.innerHTML = `<span style="color:var(--text-tertiary); font-size:0.76rem;">no exports matching "${escHtml(m.query || "")}" in ${escHtml(m.module || "")}</span>`;
+                } else {
+                    const _trunc = results.length >= 100 ? ` <span style="color:#e0af68;">(first 100 shown — type more letters to narrow)</span>` : "";
+                    box.innerHTML = `<div style="font-size:0.7rem; color:var(--text-tertiary); margin-bottom:4px;">${results.length} match(es) — click to use:${_trunc}</div>` +
+                        results.map(r => `<span class="faker-sym-pick" data-sym="${escHtml(r.name)}" style="display:inline-block; margin:2px 4px 2px 0; padding:2px 8px; background:var(--bg-surface); border:1px solid var(--border-color); border-radius:4px; font-family:var(--font-mono); font-size:0.74rem; cursor:pointer; color:var(--primary);">${escHtml(r.name)}</span>`).join("");
+                    box.querySelectorAll(".faker-sym-pick").forEach(el => {
+                        el.onclick = () => { const si = document.getElementById("fakerSymbol"); if (si) si.value = el.dataset.sym; box.style.display = "none"; };
+                    });
+                }
+            }
+        }
+        else if (m.type === "faker_hit") {
+            if (fakerRules[m.id]) {
+                fakerRules[m.id].hits = m.hits;
+                const cell = document.getElementById("faker-hits-" + m.id);
+                if (cell) cell.textContent = m.hits;
+            }
+            const log = document.getElementById("fakerHitLog");
+            if (log) {
+                const changed = m.mode === "return" && m.orig_ret !== m.forced_ret;
+                const retHtml = changed
+                    ? `<span style="color:#9ece6a;">${escHtml(m.orig_ret)} &rarr; ${escHtml(m.forced_ret)}</span>`
+                    : `<span style="color:var(--text-tertiary);">${escHtml(m.orig_ret)}</span>`;
+                const line = document.createElement("div");
+                line.innerHTML = `<span style="color:var(--text-tertiary);">${escHtml(m._ts || "")}</span> ` +
+                    `<span style="color:var(--primary);">${escHtml(m.label || m.symbol || "")}</span> ret ${retHtml} ` +
+                    `<span style="color:var(--text-tertiary);">args=[${escHtml((m.args || []).join(", "))}] caller=${escHtml(m.caller || "")}</span>`;
+                log.insertBefore(line, log.firstChild);
+                while (log.childNodes.length > 300) log.removeChild(log.lastChild);
+            }
         }
         else if (m.type === "dll_monitor" || m.type === "registry_file_monitor") {
             if (m.type === "dll_monitor") {
@@ -1563,7 +1645,7 @@ document.addEventListener("DOMContentLoaded", () => {
         btnAnalyzeAI.onclick = async () => {
             const total = sessionCapture.tcpPackets.length + sessionCapture.dllEvents.length +
                           sessionCapture.registryEvents.length + sessionCapture.staticStrings.length +
-                          sessionCapture.memoryStrings.length;
+                          sessionCapture.memoryStrings.length + sessionCapture.cryptoEvents.length;
             if (total === 0) {
                 addVulnLog("No data captured yet. Start the hook and generate some traffic first.");
                 return;
@@ -1575,7 +1657,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 registry_events: sessionCapture.registryEvents.slice(-100),
                 file_events:     sessionCapture.fileEvents.slice(-100),
                 memory_strings:  sessionCapture.memoryStrings.slice(0,200).map(s => ({ type:s.type, val:s.val })),
-                static_strings:  sessionCapture.staticStrings.slice(0,200).map(s => ({ val:s.val }))
+                static_strings:  sessionCapture.staticStrings.slice(0,200).map(s => ({ val:s.val })),
+                crypto_events:   sessionCapture.cryptoEvents.slice(-100).map(c => ({ api:c.api, op:c.op, size:c.size, body:(c.body||"").substring(0,512), dpapi_local_machine:c.dpapi_local_machine, dpapi_entropy:c.dpapi_entropy }))
             };
             fetch("/api/analyze_vulnerabilities", {
                 method: "POST",
@@ -1595,7 +1678,7 @@ document.addEventListener("DOMContentLoaded", () => {
         btnAnalyzeRules.onclick = async () => {
             const total = sessionCapture.tcpPackets.length + sessionCapture.dllEvents.length +
                           sessionCapture.registryEvents.length + sessionCapture.staticStrings.length +
-                          sessionCapture.memoryStrings.length;
+                          sessionCapture.memoryStrings.length + sessionCapture.cryptoEvents.length;
             addVulnLog(`Rule-based scan started... (${total} captured events)`);
             btnAnalyzeRules.disabled = true;
             btnAnalyzeRules.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 1s linear infinite;"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg> Scanning...`;
@@ -1606,7 +1689,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     registry_events: sessionCapture.registryEvents.slice(-100),
                     file_events:     sessionCapture.fileEvents.slice(-100),
                     memory_strings:  sessionCapture.memoryStrings.slice(0,200).map(s => ({ type:s.type, val:s.val })),
-                    static_strings:  sessionCapture.staticStrings.slice(0,200).map(s => ({ val:s.val }))
+                    static_strings:  sessionCapture.staticStrings.slice(0,200).map(s => ({ val:s.val })),
+                    crypto_events:   sessionCapture.cryptoEvents.slice(-100).map(c => ({ api:c.api, op:c.op, size:c.size, body:(c.body||"").substring(0,512), dpapi_local_machine:c.dpapi_local_machine, dpapi_entropy:c.dpapi_entropy }))
                 };
                 const resp = await fetch("/api/rule_scan", {
                     method: "POST",
@@ -2218,6 +2302,151 @@ document.addEventListener("DOMContentLoaded", () => {
             if (countEl) countEl.textContent = "0 processes";
         };
     }
+
+    // ── Crypto Monitor (DPAPI / CNG / CryptoAPI plaintext) ────────────────────
+    function _cryptoIsSecret(ev) { return ev.op === "unprotect" || ev.op === "decrypt"; }
+
+    function _cryptoMatchesFilter(ev) {
+        if (cryptoSecretsOnly && !_cryptoIsSecret(ev)) return false;
+        if (!cryptoSearchText) return true;
+        const q = cryptoSearchText.toLowerCase();
+        return (ev.api || "").toLowerCase().includes(q)
+            || (ev.op  || "").toLowerCase().includes(q)
+            || (ev.body|| "").toLowerCase().includes(q);
+    }
+
+    function _cryptoPreview(ev) {
+        // Prefer printable UTF-8; fall back to spaced hex for binary blobs.
+        const raw = ev.body || "";
+        if (raw) {
+            const printable = (raw.match(/[\x20-\x7E]/g) || []).length;
+            if (printable >= raw.length * 0.6) return raw.slice(0, 300);
+        }
+        const hex = ev.body_hex || "";
+        return hex ? (hex.match(/../g) || []).join(" ").slice(0, 300) : "";
+    }
+
+    function renderCryptoRow(ev) {
+        const tbody = document.getElementById("tblCryptoBody");
+        if (!tbody || !_cryptoMatchesFilter(ev)) return;
+        const secret = _cryptoIsSecret(ev);
+        const tr = document.createElement("tr");
+        if (secret) tr.style.cssText = "background:rgba(158,206,106,0.08);";
+        const opColor = secret ? "#9ece6a" : "#7aa2f7";
+        const opBadge = `<span style="padding:1px 6px; border-radius:3px; font-size:0.7rem; font-weight:600; background:${opColor}22; color:${opColor};">${escHtml(ev.op || "")}</span>`;
+        let flags = "";
+        if (ev.dpapi_local_machine) flags += ` <span title="DPAPI LOCAL_MACHINE scope: any user or process on this host can decrypt this blob" style="padding:1px 5px; border-radius:3px; font-size:0.66rem; background:rgba(255,68,68,0.18); color:#ff6b6b;">LOCAL_MACHINE</span>`;
+        if (ev.dpapi_entropy === false && (ev.api || "").indexOf("Data") !== -1) flags += ` <span title="DPAPI called without secondary entropy — weaker protection" style="padding:1px 5px; border-radius:3px; font-size:0.66rem; background:rgba(224,175,104,0.18); color:#e0af68;">no-entropy</span>`;
+        const idx = sessionCapture.cryptoEvents.indexOf(ev) + 1;
+        tr.innerHTML = `
+            <td>${idx}</td>
+            <td>${escHtml(ev.ts || "")}</td>
+            <td style="font-family:var(--font-mono); font-size:0.75rem; word-break:break-all;">${escHtml(ev.api || "")}</td>
+            <td>${opBadge}</td>
+            <td style="text-align:right; color:var(--text-secondary);">${ev.size | 0}</td>
+            <td style="font-family:var(--font-mono); font-size:0.76rem; word-break:break-all; white-space:pre-wrap;">${escHtml(_cryptoPreview(ev))}${flags}</td>`;
+        tbody.appendChild(tr);
+        while (tbody.rows.length > 1000) tbody.deleteRow(0);
+        const countEl = document.getElementById("cryptoCount");
+        if (countEl) countEl.textContent = sessionCapture.cryptoEvents.length + " events";
+    }
+
+    function rebuildCryptoTable() {
+        const tbody = document.getElementById("tblCryptoBody");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+        sessionCapture.cryptoEvents.forEach(ev => renderCryptoRow(ev));
+        const countEl = document.getElementById("cryptoCount");
+        if (countEl) countEl.textContent = sessionCapture.cryptoEvents.length + " events";
+    }
+
+    const cryptoSearchEl = document.getElementById("cryptoSearch");
+    if (cryptoSearchEl) cryptoSearchEl.oninput = () => { cryptoSearchText = cryptoSearchEl.value.trim(); rebuildCryptoTable(); };
+
+    const cryptoSecretsOnlyEl = document.getElementById("cryptoSecretsOnly");
+    if (cryptoSecretsOnlyEl) cryptoSecretsOnlyEl.onchange = () => { cryptoSecretsOnly = cryptoSecretsOnlyEl.checked; rebuildCryptoTable(); };
+
+    const btnClearCrypto = document.getElementById("btnClearCrypto");
+    if (btnClearCrypto) btnClearCrypto.onclick = () => {
+        sessionCapture.cryptoEvents = [];
+        const tbody = document.getElementById("tblCryptoBody");
+        if (tbody) tbody.innerHTML = "";
+        const countEl = document.getElementById("cryptoCount");
+        if (countEl) countEl.textContent = "0 events";
+    };
+
+    // ── Function Faker (live return-value / trace hooks) ──────────────────────
+    function fakerTargetLabel(r) {
+        return r.symbol ? ((r.module ? r.module + "!" : "") + r.symbol) : ((r.module || "") + "+" + (r.offset || ""));
+    }
+
+    function renderFakerRules() {
+        const tbody = document.getElementById("tblFakerRules");
+        if (!tbody) return;
+        const ids = Object.keys(fakerRules);
+        if (!ids.length) {
+            tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--text-tertiary); padding:24px;">No faker hooks yet. Try <strong>kernel32.dll</strong> + <strong>IsDebuggerPresent</strong> with value <strong>0</strong>, or your app's <strong>IsLicenseValid</strong> with <strong>1</strong>, then <strong>Add hook</strong>.</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = "";
+        ids.forEach(id => {
+            const r = fakerRules[id];
+            const modeBadge = r.mode === "return"
+                ? `<span style="color:#ff8c00; font-weight:600;">force ret</span>`
+                : `<span style="color:#7aa2f7;">trace</span>`;
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+                <td style="font-family:var(--font-mono); font-size:0.77rem; word-break:break-all;">${escHtml(fakerTargetLabel(r))}</td>
+                <td>${modeBadge}</td>
+                <td style="font-family:var(--font-mono);">${r.mode === "return" ? escHtml(r.value) : "—"}</td>
+                <td style="text-align:center;" id="faker-hits-${escHtml(id)}">${r.hits | 0}</td>
+                <td style="font-family:var(--font-mono); font-size:0.72rem; color:var(--text-tertiary);">${escHtml(r.addr || "")}</td>
+                <td style="text-align:center;"><button class="faker-remove-btn" data-id="${escHtml(id)}" style="background:none; border:1px solid var(--border-color); color:#ff6b6b; border-radius:4px; padding:1px 8px; font-size:0.72rem; cursor:pointer;">remove</button></td>`;
+            tbody.appendChild(tr);
+        });
+        tbody.querySelectorAll(".faker-remove-btn").forEach(b => {
+            b.onclick = () => { if (ws) ws.send(JSON.stringify({ action: "faker_remove", id: b.dataset.id })); };
+        });
+    }
+
+    const btnFakerAdd = document.getElementById("btnFakerAdd");
+    if (btnFakerAdd) btnFakerAdd.onclick = () => {
+        const module = (document.getElementById("fakerModule").value || "").trim();
+        const symbol = (document.getElementById("fakerSymbol").value || "").trim();
+        const offset = (document.getElementById("fakerOffset").value || "").trim();
+        const mode   = document.getElementById("fakerMode").value;
+        const value  = (document.getElementById("fakerValue").value || "1").trim();
+        if (!symbol && !offset) { showToast("Enter a function name or an offset.", "error"); return; }
+        if (offset && !module) { showToast("An offset needs a module.", "error"); return; }
+        if (!ws) { showToast("Not connected.", "error"); return; }
+        const id = "f" + (++fakerRuleSeq);
+        const st = document.getElementById("fakerStatus");
+        if (st) { st.textContent = "installing " + (symbol || module + "+" + offset) + "..."; st.style.color = "var(--text-tertiary)"; }
+        ws.send(JSON.stringify({ action: "faker_add", id, module, symbol, offset, mode, value }));
+    };
+
+    const btnFakerFind = document.getElementById("btnFakerFind");
+    if (btnFakerFind) btnFakerFind.onclick = () => {
+        const module = (document.getElementById("fakerModule").value || "").trim();
+        const query  = (document.getElementById("fakerSymbol").value || "").trim();
+        if (!module) { showToast("Enter a module to search its exports.", "error"); return; }
+        const box = document.getElementById("fakerSearchBox");
+        if (query.length < 2) {
+            if (box) { box.style.display = "block"; box.innerHTML = `<span style="color:var(--text-tertiary); font-size:0.76rem;">Type at least 2 letters of the function name in the <strong>Function name</strong> field first, then Find fn — e.g. <code>Debugger</code>.</span>`; }
+            return;
+        }
+        if (!ws) return;
+        if (box) { box.style.display = "block"; box.innerHTML = `<span style="color:var(--text-tertiary); font-size:0.76rem;">searching ${escHtml(module)} for "${escHtml(query)}"...</span>`; }
+        ws.send(JSON.stringify({ action: "faker_search", module, query }));
+    };
+
+    const btnFakerClearHits = document.getElementById("btnFakerClearHits");
+    if (btnFakerClearHits) btnFakerClearHits.onclick = () => { const l = document.getElementById("fakerHitLog"); if (l) l.innerHTML = ""; };
+
+    // Refresh the rules table from live Frida state whenever the tab is opened
+    // (restores it after a browser reconnect — the hooks live in the process).
+    const tabBtnFaker = document.getElementById("tabBtnFaker");
+    if (tabBtnFaker) tabBtnFaker.addEventListener("click", () => { if (ws) ws.send(JSON.stringify({ action: "faker_list" })); });
 
     // ─────────────────────────────────────────────────────────────────────────
 

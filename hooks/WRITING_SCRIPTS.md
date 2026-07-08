@@ -45,6 +45,12 @@ Appends a line to the Bridge Log panel inside the Bridge tab. Required fields: `
 **alert**
 Triggers an immediate vulnerability report entry. Required fields: `type`, `title`, `message`, `socket`.
 
+**crypto_event**
+Appears in the Crypto tab. Emitted by the Windows crypto hooks to show plaintext captured at the crypto boundary — before encryption or after decryption. Required fields: `type`, `api`, `op` (one of `"protect"`, `"unprotect"`, `"encrypt"`, `"decrypt"`), `size`. Attach the plaintext bytes as the second argument to `send()`; Safiye exposes them as `body` / `body_hex`. Optional: `dpapi_local_machine` and `dpapi_entropy` (booleans, for DPAPI calls — used by the rule scanner to flag insecure scope) and `_ts` (timestamp string). `crypto_event` is a replayable stream type, so it is restored to reconnecting clients and included in the AI capture context.
+
+**faker_hit**
+Appears in the Faker tab's Hit Log. Emitted by a Function Faker hook each time the target function is called. Fields: `type`, `id` (rule id), `label`, `module`, `symbol`, `args` (array of the first four arguments as strings), `orig_ret`, `forced_ret`, `mode` (`"return"` or `"trace"`), `caller`, `hits`, `_ts`. Faker hooks are installed at runtime via the primary script's `fakeradd` RPC export (driven by the Faker tab), not by `send()` from your own script.
+
 Any message type not in this list is still delivered to the browser over WebSocket; the UI silently ignores unknown types unless you add a handler for them in `app.js`.
 
 

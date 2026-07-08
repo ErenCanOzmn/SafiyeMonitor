@@ -107,12 +107,14 @@
                 <button class="tab-btn" data-target="tab-intercept" id="tabBtnIntercept">Intercept</button>
                 <button class="tab-btn" data-target="tab-repeater">Repeater</button>
                 <button class="tab-btn" data-target="tab-bridge">Bridge</button>
+                <button class="tab-btn" data-target="tab-faker" id="tabBtnFaker">Faker</button>
                 <span class="tab-group-sep" aria-hidden="true"></span>
                 <button class="tab-btn" data-target="tab-registry">Registry</button>
                 <button class="tab-btn" data-target="tab-memory">Memory</button>
                 <button class="tab-btn" data-target="tab-static">Strings</button>
                 <button class="tab-btn" data-target="tab-dll">DLL & Modules</button>
                 <button class="tab-btn" data-target="tab-processes" id="tabBtnProcesses">Processes</button>
+                <button class="tab-btn" data-target="tab-crypto" id="tabBtnCrypto">Crypto</button>
                 <button class="tab-btn" data-target="tab-pipelist" id="tabBtnPipelist">Pipelist</button>
                 <span class="tab-group-sep" aria-hidden="true"></span>
                 <button class="tab-btn" data-target="tab-vulnerabilities" id="tabBtnVuln" style="background: rgba(255, 107, 107, 0.1); color: #ff6b6b; font-weight: 600;">Vulnerabilities <span id="vulnCountBadge" style="display:none; background:#ff6b6b; color:white; padding:0 6px; border-radius:10px; font-size:0.7rem;">0</span></button>
@@ -521,6 +523,83 @@
                     </div>
                 </div>
 
+                <!-- FAKER TAB -->
+                <div id="tab-faker" class="tab-content" style="overflow:hidden;">
+                    <!-- Add-rule toolbar -->
+                    <div style="flex-shrink:0; padding:8px 14px; background:var(--bg-surface); border-bottom:1px solid var(--border-color); display:flex; gap:7px; align-items:center; flex-wrap:wrap;">
+                        <input id="fakerModule" placeholder="Module (app.exe, kernel32.dll)" style="background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:4px 9px; color:var(--text-primary); font-size:0.8rem; width:210px; outline:none;">
+                        <input id="fakerSymbol" placeholder="Function name" style="background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:4px 9px; color:var(--text-primary); font-size:0.8rem; width:180px; outline:none;">
+                        <span style="color:var(--text-tertiary); font-size:0.74rem;">or</span>
+                        <input id="fakerOffset" placeholder="+offset (0x1234)" style="background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:4px 9px; color:var(--text-primary); font-size:0.8rem; width:120px; outline:none;">
+                        <select id="fakerMode" style="background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:4px 6px; color:var(--text-primary); font-size:0.8rem; outline:none;">
+                            <option value="return">Force return</option>
+                            <option value="trace">Trace only</option>
+                        </select>
+                        <input id="fakerValue" value="1" title="Value to force the return to (e.g. 1 = true, 0 = false, 0x1)" style="background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:4px 9px; color:var(--text-primary); font-size:0.8rem; width:64px; outline:none;">
+                        <button id="btnFakerAdd" class="btn btn-primary" style="font-size:0.78rem; padding:4px 12px;">Add hook</button>
+                        <button id="btnFakerFind" class="btn btn-neutral" style="font-size:0.78rem; padding:4px 10px;">Find fn</button>
+                        <span id="fakerStatus" style="font-size:0.75rem; color:var(--text-tertiary);"></span>
+                    </div>
+                    <!-- export search results -->
+                    <div id="fakerSearchBox" style="display:none; flex-shrink:0; max-height:140px; overflow-y:auto; padding:7px 14px; background:var(--bg-raised); border-bottom:1px solid var(--border-color);"></div>
+                    <!-- active rules -->
+                    <div style="flex:1; overflow-y:auto; min-height:0;">
+                        <table class="data-table" style="width:100%;">
+                            <thead>
+                                <tr>
+                                    <th width="26%">Target</th>
+                                    <th width="11%">Mode</th>
+                                    <th width="10%">Value</th>
+                                    <th width="8%">Hits</th>
+                                    <th>Address</th>
+                                    <th width="9%"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="tblFakerRules">
+                                <tr><td colspan="6" style="text-align:center; color:var(--text-tertiary); padding:24px;">No faker hooks yet. Try <strong>kernel32.dll</strong> + <strong>IsDebuggerPresent</strong> with value <strong>0</strong>, or your app's <strong>IsLicenseValid</strong> with <strong>1</strong>, then <strong>Add hook</strong>.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <!-- hit log -->
+                    <div style="flex-shrink:0; height:150px; border-top:1px solid var(--border-color); display:flex; flex-direction:column;">
+                        <div style="padding:5px 14px; background:var(--bg-surface); font-size:0.68rem; font-weight:700; text-transform:uppercase; letter-spacing:1.2px; color:var(--text-tertiary); border-bottom:1px solid var(--border-color); display:flex; align-items:center;">
+                            <span>Hit Log</span>
+                            <button id="btnFakerClearHits" style="margin-left:auto; background:none; border:none; color:var(--text-tertiary); font-size:0.72rem; cursor:pointer;">clear</button>
+                        </div>
+                        <div id="fakerHitLog" style="flex:1; overflow-y:auto; padding:6px 14px; font-family:var(--font-mono); font-size:0.74rem; color:var(--text-secondary); line-height:1.65;"></div>
+                    </div>
+                </div>
+
+                <!-- CRYPTO TAB -->
+                <div id="tab-crypto" class="tab-content" style="overflow:hidden;">
+                    <div style="flex-shrink:0; padding:7px 14px; background:var(--bg-surface); border-bottom:1px solid var(--border-color); display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--text-tertiary); flex-shrink:0;"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                        <input id="cryptoSearch" placeholder="Search API or plaintext preview..." style="background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:4px 9px; color:var(--text-primary); font-size:0.8rem; width:260px; outline:none;">
+                        <label style="display:flex; align-items:center; gap:5px; font-size:0.78rem; color:var(--text-secondary); cursor:pointer; user-select:none;">
+                            <input type="checkbox" id="cryptoSecretsOnly" style="accent-color:#9ece6a;">
+                            Recovered secrets only
+                        </label>
+                        <button id="btnClearCrypto" class="btn btn-neutral" style="font-size:0.78rem; padding:3px 10px;">Clear</button>
+                        <span style="font-size:0.72rem; color:var(--text-tertiary);">Plaintext captured at the crypto boundary (DPAPI / CNG / CryptoAPI) — before encryption / after decryption.</span>
+                        <span id="cryptoCount" style="font-size:0.73rem; color:var(--text-tertiary); margin-left:auto;">0 events</span>
+                    </div>
+                    <div style="flex:1; overflow-y:auto; min-height:0;">
+                        <table class="data-table" style="width:100%;">
+                            <thead>
+                                <tr>
+                                    <th width="4%">#</th>
+                                    <th width="9%">Time</th>
+                                    <th width="14%">API</th>
+                                    <th width="9%">Operation</th>
+                                    <th width="7%">Bytes</th>
+                                    <th>Plaintext preview</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tblCryptoBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
                 <!-- PIPELIST TAB -->
                 <div id="tab-pipelist" class="tab-content" style="overflow:hidden;">
                     <!-- Toolbar -->
@@ -684,7 +763,7 @@
         </ul>
     </div>
 
-    <script src="/static/js/app.js?v=17.0"></script>
+    <script src="/static/js/app.js?v=20.0"></script>
 
     <!-- Pixel art walking Calico cat — Safiye Edition -->
     <style>

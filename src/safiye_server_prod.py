@@ -59,7 +59,7 @@ state.bridge = None
 state.open_pipes = {}
 state._pipe_id_seq = 0
 
-_REPLAY_STREAM   = {"tcp_out", "tcp_in", "dll_monitor", "registry_file_monitor", "bridge_req", "process_spawn"}
+_REPLAY_STREAM   = {"tcp_out", "tcp_in", "dll_monitor", "registry_file_monitor", "bridge_req", "process_spawn", "crypto_event", "faker_hit"}
 _REPLAY_SNAPSHOT = {"memory_dump", "static_strings"}
 
 _RE_SQLI = re.compile(
@@ -407,10 +407,55 @@ def frida_on_message(message, data):
         logger.error(f"[FRIDA ERROR] {message}")
         state.packet_queue.put({"type": "error", "message": str(message)})
 
+def _clean_path(p: str) -> str:
+    """Strip whitespace and surrounding quotes (Windows 'Copy as path' wraps in
+    double quotes) and expand ~ and %ENV% so pasted paths just work."""
+    if not p:
+        return ""
+    p = p.strip().strip('"').strip("'").strip()
+    return os.path.expandvars(os.path.expanduser(p))
+
+
+def _resolve_existing(p: str):
+    """Return an absolute path to `p` if it can be found, else None.
+
+    Relative paths are resolved against the current working directory, the Safiye
+    project root, and src/ — so `demo/SafiyeFakerDemo.exe` or
+    `hooks/safiye_frida_script.js` work no matter where the server was launched
+    from (the whole reason spawn used to fail with a relative path)."""
+    p = _clean_path(p)
+    if not p:
+        return None
+    if os.path.isabs(p):
+        return p if os.path.exists(p) else None
+    project_root = os.path.dirname(BASE_DIR)   # BASE_DIR = .../src
+    for base in (os.getcwd(), project_root, BASE_DIR):
+        cand = os.path.abspath(os.path.join(base, p))
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
 def frida_worker_thread(target_exe: str, target_scripts: list, args: str):
     try:
+        exe = _resolve_existing(target_exe)
+        if not exe:
+            raise FileNotFoundError(
+                f"Target executable not found: {target_exe!r}. "
+                "Enter a full path, or a path relative to the Safiye project folder."
+            )
+        resolved_scripts = []
+        for sp in target_scripts:
+            rp = _resolve_existing(sp)
+            if not rp:
+                raise FileNotFoundError(
+                    f"Frida script not found: {sp!r}. "
+                    "Enter a full path, or a path relative to the Safiye project folder."
+                )
+            resolved_scripts.append(rp)
+
         device = frida.get_local_device()
-        spawn_args = [target_exe]
+        spawn_args = [exe]
         if args:
             import shlex
             try:
@@ -426,7 +471,7 @@ def frida_worker_thread(target_exe: str, target_scripts: list, args: str):
             pid = device.spawn(spawn_args)
         session = device.attach(pid)
         loaded = []
-        for path in target_scripts:
+        for path in resolved_scripts:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 js_code = f.read()
             s = session.create_script(js_code)
@@ -727,11 +772,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     threading.Thread(target=do_dump, daemon=True).start()
             
             elif action == "get_static_strings":
-                path = cmd.get("path")
-                if not path or not os.path.exists(path):
+                raw_path = cmd.get("path")
+                path = _resolve_existing(raw_path)
+                if not path:
                     await websocket.send_json({
                         "type": "static_strings_error",
-                        "message": f"Static strings: target binary path not found ({path or 'empty'}). Set the Target Executable first.",
+                        "message": f"Static strings: target binary not found ({raw_path or 'empty'}). Set the Target Executable first.",
                     })
                 else:
                     def do_static():
@@ -950,6 +996,54 @@ async def websocket_endpoint(websocket: WebSocket):
                     logger.error(f"[REPEATER cURL] Error: {e}")
                     await websocket.send_json({"type": "repeater_response", "data": f"Error: {e}"})
 
+            elif action == "faker_add":
+                if not state.frida_script:
+                    await websocket.send_json({"type": "faker_result", "op": "add", "id": cmd.get("id"), "result": "error:no active hook"})
+                else:
+                    rid = cmd.get("id"); mod = cmd.get("module", ""); sym = cmd.get("symbol", "")
+                    off = cmd.get("offset", ""); fmode = cmd.get("mode", "return"); val = str(cmd.get("value", "1"))
+                    def do_faker_add(rid=rid, mod=mod, sym=sym, off=off, fmode=fmode, val=val):
+                        try:
+                            res = state.frida_script.exports_sync.fakeradd(rid, mod, sym, off, fmode, val)
+                        except Exception as e:
+                            res = f"error:{e}"
+                        asyncio.run_coroutine_threadsafe(broadcast_message({
+                            "type": "faker_result", "op": "add", "id": rid, "module": mod, "symbol": sym,
+                            "offset": off, "mode": fmode, "value": val, "result": res}), loop)
+                    threading.Thread(target=do_faker_add, daemon=True).start()
+
+            elif action == "faker_remove":
+                if state.frida_script:
+                    rid = cmd.get("id")
+                    def do_faker_remove(rid=rid):
+                        try:
+                            res = state.frida_script.exports_sync.fakerremove(rid)
+                        except Exception as e:
+                            res = f"error:{e}"
+                        asyncio.run_coroutine_threadsafe(broadcast_message({"type": "faker_result", "op": "remove", "id": rid, "result": res}), loop)
+                    threading.Thread(target=do_faker_remove, daemon=True).start()
+
+            elif action == "faker_list":
+                if state.frida_script:
+                    def do_faker_list():
+                        try:
+                            res = state.frida_script.exports_sync.fakerlist()
+                        except Exception as e:
+                            logger.error(f"faker_list error: {e}"); res = []
+                        asyncio.run_coroutine_threadsafe(broadcast_message({"type": "faker_list", "rules": res}), loop)
+                    threading.Thread(target=do_faker_list, daemon=True).start()
+
+            elif action == "faker_search":
+                if state.frida_script:
+                    mod = cmd.get("module", ""); q = cmd.get("query", "")
+                    def do_faker_search(mod=mod, q=q):
+                        try:
+                            res = state.frida_script.exports_sync.fakersearch(mod, q, 100)
+                        except Exception as e:
+                            logger.error(f"faker_search error: {e}"); res = []
+                        asyncio.run_coroutine_threadsafe(broadcast_message({"type": "faker_search", "module": mod, "query": q, "results": res}), loop)
+                    threading.Thread(target=do_faker_search, daemon=True).start()
+
     except WebSocketDisconnect:
         state.connected_clients.remove(websocket)
 
@@ -1011,6 +1105,50 @@ _RE_CONNSTR   = re.compile(r'(server=.*password=|jdbc:[a-z]+://|mongodb\+srv://|
 _RE_WEAKCRYP  = re.compile(r'\b(md5|des|rc4|3des|des-cbc)\b', re.I)
 _RE_HEXKEY    = re.compile(r'^[0-9a-fA-F]{32,64}$')
 
+# ── Inbound / response detectors (server -> client) ─────────────────────────────
+_RE_STACK     = re.compile(
+    r'(Traceback \(most recent call last\)'
+    r'|System\.[A-Za-z][\w.]*Exception'
+    r'|java\.(?:lang|util|io|net|sql)\.[A-Za-z]+Exception'
+    r'|\bat [\w.$<>+]+\.[\w<>$]+\([^)]*\)'
+    r'|(?:Fatal error|Parse error):.{0,80} on line \d+'
+    r'|Microsoft\.[A-Za-z][\w.]*Exception'
+    r'|Uncaught \w*(?:Error|Exception))', re.I)
+_RE_DBERR     = re.compile(
+    r'(ORA-\d{5}'
+    r'|SQLSTATE\['
+    r'|Unclosed quotation mark'
+    r'|You have an error in your SQL syntax'
+    r'|Microsoft OLE DB Provider'
+    r'|System\.Data\.SqlClient\.SqlException'
+    r'|(?:MySql|Sql|Pdo)Exception'
+    r'|PostgreSQL.{0,20}ERROR'
+    r'|SQLite(?:\.Interop)? error'
+    r'|Warning: (?:mysqli?|pg|oci|sqlsrv)_)', re.I)
+_RE_INTPATH   = re.compile(
+    r'([A-Za-z]:\\(?:Users|Windows|inetpub|wwwroot|Temp|Program Files)\\[^\s<>|"]{0,80}'
+    r'|\\\\[\w.-]+\\[\w$.-]+'
+    r'|/(?:home|var/www|usr/local|opt)/[\w./-]{2,80})')
+_RE_PRIVIP    = re.compile(r'\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b')
+_RE_SETCOOKIE = re.compile(r'(?im)^\s*set-cookie:\s*([^\r\n]+)')
+_RE_SESSCOOKIE = re.compile(r'(sess|session|auth|jwt|sid|token|login|remember|asp\.net)', re.I)
+_RE_CARD      = re.compile(r'(?<!\d)(?:\d[ -]?){13,19}(?!\d)')
+
+
+def _luhn_ok(number: str) -> bool:
+    """Validate a candidate card number with the Luhn checksum to cut false positives."""
+    digits = [int(c) for c in number if c.isdigit()]
+    if not (13 <= len(digits) <= 19):
+        return False
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
 
 def _finding(severity, title, description, evidence="", verification_steps=None, exploitation_notes=""):
     return {
@@ -1032,6 +1170,41 @@ def run_rule_scan(data: dict) -> list:
     file_events     = data.get("file_events", [])[:100]
     memory_strings  = data.get("memory_strings", [])[:200]
     static_strings  = data.get("static_strings", [])[:200]
+    crypto_events   = data.get("crypto_events", [])[:100]
+
+    # ── Windows crypto boundary (DPAPI / CNG / CryptoAPI) ───────────────────────
+    _dpapi_lm = False
+    _crypto_cred_samples = []
+    for ce in crypto_events:
+        op    = (ce.get("op") or "")
+        api   = (ce.get("api") or "")
+        cbody = (ce.get("body") or "")[:512]
+        if ce.get("dpapi_local_machine"):
+            _dpapi_lm = True
+        # Recovered plaintext (decrypt/unprotect) frequently exposes stored secrets.
+        if op in ("decrypt", "unprotect") and cbody:
+            m = _RE_STR_CRED.search(cbody) or _RE_CRED.search(cbody)
+            if m and len(_crypto_cred_samples) < 5:
+                _crypto_cred_samples.append(f"{api}: {m.group(0)[:120]}")
+    if _dpapi_lm:
+        findings.append(_finding(
+            "MEDIUM", "Insecure DPAPI Scope (LOCAL_MACHINE)",
+            "The application protects data with DPAPI using the CRYPTPROTECT_LOCAL_MACHINE flag. "
+            "Any user or process on the same host can call CryptUnprotectData to recover the plaintext, "
+            "so this offers no protection against a local attacker.",
+            evidence="CryptProtectData / CryptProtectMemory called with LOCAL_MACHINE scope (see the Crypto tab).",
+            verification_steps=["Open the Crypto tab and inspect the protected blobs.", "Recover the plaintext locally with a DPAPI tool to confirm."],
+            exploitation_notes="A local attacker or malware running as any user can decrypt LOCAL_MACHINE DPAPI blobs without the user's password.",
+        ))
+    for sample in _crypto_cred_samples:
+        findings.append(_finding(
+            "HIGH", "Secret Recovered at Crypto Boundary",
+            "Plaintext recovered from a decrypt / unprotect call contains credential-like material. "
+            "This secret is handled in cleartext inside the process even though it is stored or transmitted encrypted.",
+            evidence=sample,
+            verification_steps=["Open the Crypto tab and locate the decrypt/unprotect event.", "Confirm the value is a live credential or token."],
+            exploitation_notes="Extract the secret from the Crypto tab or process memory and reuse it directly.",
+        ))
 
     # ── Network Traffic ────────────────────────────────────────────────────────
     for pkt in tcp_packets:
@@ -1144,6 +1317,95 @@ def run_rule_scan(data: dict) -> list:
                 evidence=body[:200],
                 verification_steps=["Confirm the XML is parsed server-side.", "Try reading /etc/passwd or C:\\Windows\\win.ini via SYSTEM entity."],
                 exploitation_notes="Use a Burp Collaborator/interactsh payload to confirm out-of-band XXE.",
+            ))
+
+    # ── Inbound / Response Scanning (server -> client) ──────────────────────────
+    # Everything above scans OUTBOUND requests. Server responses carry half the
+    # signal — errors, stack traces, leaked paths, PII, weak cookies — so scan
+    # inbound bodies too (all inbound directions contain "Incoming"). Cap each rule
+    # so one chatty endpoint cannot flood the findings list.
+    _resp_caps = {}
+    def _resp_ok(rule, limit=3):
+        _resp_caps[rule] = _resp_caps.get(rule, 0) + 1
+        return _resp_caps[rule] <= limit
+
+    for pkt in tcp_packets:
+        if "Incoming" not in (pkt.get("direction") or ""):
+            continue
+        body = (pkt.get("body") or "")[:1024]
+        if not body:
+            continue
+        dest = pkt.get("dest", "unknown")
+
+        # Verbose error / stack trace leak
+        m = _RE_STACK.search(body)
+        if m and _resp_ok("stack"):
+            findings.append(_finding(
+                "MEDIUM", "Verbose Error / Stack Trace in Response",
+                "The server returned a framework stack trace or verbose error. These leak internal class "
+                "names, file paths, component versions and query fragments that make further attacks easier.",
+                evidence=f"From {dest}: {m.group(0)[:200]}",
+                verification_steps=["Trigger the error deliberately with malformed input and capture the full trace.", "Record the leaked framework/version and file paths."],
+                exploitation_notes="Fingerprint the stack from the trace; pair the leaked query/path with targeted injection.",
+            ))
+
+        # Database error message (corroborates SQL injection)
+        m = _RE_DBERR.search(body)
+        if m and _resp_ok("dberr"):
+            findings.append(_finding(
+                "HIGH", "Database Error Message in Response",
+                "A raw database error was returned to the client. This confirms unsanitized input reaches the "
+                "database and is a strong error-based SQL injection signal.",
+                evidence=f"From {dest}: {m.group(0)[:200]}",
+                verification_steps=["Correlate with the outgoing request that triggered it.", "Replay via the Repeater tab with SQL metacharacters and watch the error change."],
+                exploitation_notes="Run sqlmap (error-based) against the identified endpoint.",
+            ))
+
+        # Insecure Set-Cookie flags on session/auth cookies
+        for cm in _RE_SETCOOKIE.finditer(body):
+            cookie = cm.group(1)
+            name = cookie.split("=", 1)[0].strip()
+            low = cookie.lower()
+            if not _RE_SESSCOOKIE.search(name):
+                continue
+            missing = [flag for flag, kw in (("Secure", "secure"), ("HttpOnly", "httponly")) if kw not in low]
+            if missing and _resp_ok("cookie"):
+                findings.append(_finding(
+                    "MEDIUM", "Insecure Session Cookie Flags",
+                    f"Session/auth cookie '{name}' is set without {', '.join(missing)}. Missing Secure lets it "
+                    "leak over any plaintext channel; missing HttpOnly exposes it to theft via XSS.",
+                    evidence=f"From {dest}: {cookie[:180]}",
+                    verification_steps=["Confirm the cookie carries the session/auth state.", "Check whether it is ever sent over a plaintext channel."],
+                    exploitation_notes="Steal via XSS (no HttpOnly) or network capture (no Secure) and replay the session.",
+                ))
+
+        # Payment card data (Luhn-validated PAN) returned to the client
+        for cardm in _RE_CARD.finditer(body):
+            if _luhn_ok(cardm.group(0)) and _resp_ok("pan", 2):
+                digits = "".join(c for c in cardm.group(0) if c.isdigit())
+                masked = digits[:6] + "*" * max(0, len(digits) - 10) + digits[-4:]
+                findings.append(_finding(
+                    "HIGH", "Payment Card Data (PAN) in Response",
+                    "A Luhn-valid primary account number was returned to the client. Card data in responses is "
+                    "a PCI-DSS concern and often signals over-broad data exposure or broken object-level auth.",
+                    evidence=f"From {dest}: {masked}",
+                    verification_steps=["Confirm it is a live PAN, not test data.", "Check whether this endpoint should return card data at all, and for other users."],
+                    exploitation_notes="Test broken object-level authorization — can another user's PAN be retrieved by changing an id?",
+                ))
+                break
+
+        # Internal path / private IP disclosure
+        pm = _RE_INTPATH.search(body)
+        ipm = _RE_PRIVIP.search(body)
+        if (pm or ipm) and _resp_ok("intdisc"):
+            leak = pm.group(0) if pm else ipm.group(0)
+            findings.append(_finding(
+                "LOW", "Internal Path or Private IP Disclosed in Response",
+                "The response exposes an internal filesystem path or private IP address, revealing server "
+                "layout and network topology useful for traversal, SSRF and lateral movement.",
+                evidence=f"From {dest}: {leak[:200]}",
+                verification_steps=["Collect every disclosed path/host.", "Use them to refine traversal / SSRF / lateral-movement attempts."],
+                exploitation_notes="Feed disclosed internal hosts into SSRF payloads; use paths as traversal targets.",
             ))
 
     # ── DLL Events ─────────────────────────────────────────────────────────────

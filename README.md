@@ -23,7 +23,7 @@ Safiye is a runtime security analysis tool for Windows thick-client (desktop) ap
 ## Features
 
 - **Spawn or attach.** Launch the target and hook it from the first instruction, or attach to a process that is already running by PID or name.
-- **Network capture.** Hooks `ws2_32` (`send`, `recv`, `WSASend`, `WSARecv`, `connect`), the AFD NT layer, and OpenSSL, and de-duplicates the result.
+- **Network capture.** Hooks `ws2_32` (`send`, `recv`, `WSASend`, `WSARecv`, `connect`), the AFD NT layer, OpenSSL, and SChannel/SSPI (`EncryptMessage`/`DecryptMessage`, so .NET `SslStream`, WinHTTP and LDAPS plaintext is captured before encryption), and de-duplicates the result.
 - **Intercept and Trap.** Hold outgoing packets, edit them in UTF-8 or HEX, then forward or drop them. You can also inject your own responses.
 - **Repeater.** Replay any packet. There are two send modes:
   - *Send (new TCP)* opens a fresh connection to the target and replays the bytes, so it works even after the original socket has closed.
@@ -33,7 +33,9 @@ Safiye is a runtime security analysis tool for Windows thick-client (desktop) ap
 - **Runtime monitors.** DNS, registry, file system, and DLL load events. Failed loads on writable paths are flagged as hijack candidates.
 - **Memory and Strings.** Dump readable memory and pull live strings, and scan the binary for hardcoded secrets.
 - **Named pipes.** Enumerate Windows named pipes for IPC and privilege-escalation paths.
-- **Vulnerability detection.** Insecure deserialization (Java, .NET, Python pickle, PHP magic bytes), DLL hijacking, and SQL-injection patterns in HTTP bodies. The rule scanner is deterministic and needs no AI.
+- **Crypto capture.** Hooks the Windows crypto stack — DPAPI (`CryptProtectData`/`CryptUnprotectData`), CNG/BCrypt, and legacy CryptoAPI — to reveal application-layer plaintext before it is encrypted and secrets after they are decrypted, data that never appears on the wire in cleartext. Insecure DPAPI scope (`LOCAL_MACHINE`) and credential-like recovered plaintext are flagged.
+- **Function Faker.** Force any function's return value at runtime, or just trace its calls — point it at a module and export (or a module+offset) and, for example, make `IsLicenseValid` return `1` or `IsDebuggerPresent` return `0`. Live license, auth, and anti-debug bypass without patching the binary; every call is logged with its original and forced return.
+- **Vulnerability detection.** Insecure deserialization (Java, .NET, Python pickle, PHP magic bytes), DLL hijacking, and SQL-injection patterns in outgoing bodies, plus **response-side** checks on decrypted inbound traffic — framework stack traces, database error messages, insecure session-cookie flags, Luhn-validated card data (masked), and internal path / private-IP disclosure. The rule scanner is deterministic and needs no AI.
 - **AI analysis (MCP).** Claude, or any MCP client, can read a cleaned-up, decoded view of the capture and submit findings back into the Vulnerabilities tab.
 
 > The project is named after my cat, Safiye. That is her, the calico walking along the bottom of the window. Click her.

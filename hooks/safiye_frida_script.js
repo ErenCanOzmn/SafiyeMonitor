@@ -53,6 +53,39 @@ var pendingRecvBySocket = {};
 var captureRespBySocket = {};
 var inRepeaterSend = false;
 
+// ── FUNCTION FAKER ────────────────────────────────────────────────────────────
+// Runtime return-value / trace hooks installed on demand via RPC (fakeradd). Lets
+// an operator force any function's return value live (e.g. IsLicenseValid -> 1,
+// IsDebuggerPresent -> 0) for license/auth/anti-debug bypass, or just trace calls.
+var fakerRules = {};                       // ruleId -> { listener, module, symbol, offset, mode, value, hits, addr }
+var _fakerRate = { sec: 0, count: 0 };
+
+function _fakerAllowed() {                  // rate-limit only the UI notification, never the replace
+    var now = Math.floor(Date.now() / 1000);
+    if (now !== _fakerRate.sec) { _fakerRate.sec = now; _fakerRate.count = 0; }
+    if (_fakerRate.count >= 100) return false;
+    _fakerRate.count++;
+    return true;
+}
+
+function _fakerModule(name) {
+    try {
+        if (typeof Process.findModuleByName === "function") return Process.findModuleByName(name);
+        return Process.getModuleByName(name);
+    } catch (e) { return null; }
+}
+
+function _resolveFakerTarget(moduleName, symbol, offset) {
+    try {
+        if (symbol) return Module.findExportByName(moduleName || null, symbol);
+        if (offset) {
+            var mod = _fakerModule(moduleName);
+            if (mod) return mod.base.add(ptr(offset));
+        }
+    } catch (e) {}
+    return null;
+}
+
 function emitResponseCapture(socketId, bytes) {
     try {
         var meta = captureRespBySocket[socketId];
@@ -195,6 +228,72 @@ rpc.exports = {
             inRepeaterSend = false;
             return "error:" + e;
         }
+    },
+
+    // Install a faker hook. mode "return" forces retval to `value`; mode "trace"
+    // only reports calls. Target is module!symbol (exported) or module+offset.
+    fakeradd: function (ruleId, moduleName, symbol, offset, mode, value) {
+        try {
+            if (value === "true") value = "1";
+            else if (value === "false") value = "0";
+            if (fakerRules[ruleId]) { try { fakerRules[ruleId].listener.detach(); } catch (e) {} delete fakerRules[ruleId]; }
+            var target = _resolveFakerTarget(moduleName, symbol, offset);
+            if (!target || target.isNull()) return "error:target not found";
+            var label = symbol || (moduleName + "+" + offset);
+            var rule = { module: moduleName, symbol: symbol, offset: offset, mode: mode, value: value, hits: 0, addr: target.toString() };
+            var listener = Interceptor.attach(target, {
+                onEnter: function (args) {
+                    this.a = [];
+                    for (var i = 0; i < 4; i++) { try { this.a.push(args[i].toString()); } catch (e) { this.a.push("?"); } }
+                    this.caller = _callerMod(this.returnAddress);
+                },
+                onLeave: function (retval) {
+                    var orig = retval.toString();
+                    var forced = orig;
+                    if (mode === "return") {
+                        try { retval.replace(ptr(value)); forced = ptr(value).toString(); } catch (e) {}
+                    }
+                    rule.hits++;
+                    if (_fakerAllowed()) {
+                        send({ type: "faker_hit", id: ruleId, label: label, module: moduleName, symbol: symbol,
+                               args: this.a, orig_ret: orig, forced_ret: forced, mode: mode, caller: this.caller,
+                               hits: rule.hits, _ts: _procTs() });
+                    }
+                }
+            });
+            rule.listener = listener;
+            fakerRules[ruleId] = rule;
+            return "ok:" + target.toString();
+        } catch (e) { return "error:" + e; }
+    },
+    fakerremove: function (ruleId) {
+        try {
+            if (fakerRules[ruleId]) { try { fakerRules[ruleId].listener.detach(); } catch (e) {} delete fakerRules[ruleId]; return "ok"; }
+            return "error:no such rule";
+        } catch (e) { return "error:" + e; }
+    },
+    fakerlist: function () {
+        var out = [];
+        for (var k in fakerRules) {
+            var r = fakerRules[k];
+            out.push({ id: k, module: r.module, symbol: r.symbol, offset: r.offset, mode: r.mode, value: r.value, hits: r.hits, addr: r.addr });
+        }
+        return out;
+    },
+    fakersearch: function (moduleName, query, limit) {
+        var out = [];
+        try {
+            var mod = _fakerModule(moduleName);
+            if (!mod) return out;
+            var q = (query || "").toLowerCase();
+            var exps = mod.enumerateExports();
+            for (var i = 0; i < exps.length && out.length < (limit || 100); i++) {
+                if (!q || exps[i].name.toLowerCase().indexOf(q) !== -1) {
+                    out.push({ name: exps[i].name, address: exps[i].address.toString() });
+                }
+            }
+        } catch (e) {}
+        return out;
     }
 };
 
@@ -654,9 +753,14 @@ dllAPIs.forEach(function (api) {
             onLeave: function (retval) {
                 var isFailed = retval.isNull();
                 send({ type: "dll_monitor", dllName: this.dllName, status: isFailed ? "NAME NOT FOUND" : "SUCCESS", api: api, isFailed: isFailed });
-                // Re-install the OpenSSL traffic hook if libssl loads after startup.
-                if (!isFailed && this.dllName && this.dllName.toLowerCase().indexOf("ssl") !== -1) {
-                    try { hookSSL(); } catch (e) {}
+                // Re-install traffic/crypto hooks the instant a relevant DLL loads late,
+                // so we hook the export before the app first calls it (many TLS/crypto
+                // DLLs — secur32, crypt32, bcrypt — load lazily on first use).
+                if (!isFailed && this.dllName) {
+                    var ln = this.dllName.toLowerCase();
+                    if (ln.indexOf("ssl") !== -1) { try { hookSSL(); } catch (e) {} }
+                    if (ln.indexOf("secur32") !== -1 || ln.indexOf("sspicli") !== -1 || ln.indexOf("schannel") !== -1) { try { hookSChannel(); } catch (e) {} }
+                    if (ln.indexOf("crypt32") !== -1 || ln.indexOf("bcrypt") !== -1 || ln.indexOf("ncrypt") !== -1 || ln.indexOf("advapi32") !== -1) { try { hookCrypto(); } catch (e) {} }
                 }
             }
         });
@@ -961,5 +1065,241 @@ function _emitSpawn(api, exe, cmdline, verb, elevated, caller) {
         }
     });
 })();
+
+// ── WINDOWS CRYPTO / DPAPI MONITOR ────────────────────────────────────────────
+// Captures application-layer plaintext BEFORE it is encrypted (and secrets AFTER
+// they are decrypted) by hooking the Windows crypto stack: DPAPI (crypt32),
+// CNG/BCrypt (bcrypt.dll) and legacy CryptoAPI (advapi32). This reveals data that
+// never travels the wire in cleartext — passwords, tokens, keys — regardless of
+// TLS. Emits "crypto_event" messages that ride the same body/body_hex pipeline as
+// tcp_out. DATA_BLOB is { DWORD cbData; BYTE* pbData; }; pbData sits at offset
+// Process.pointerSize because of struct alignment (4 on x86, 8 on x64).
+
+var CRYPTPROTECT_LOCAL_MACHINE = 0x4;
+var CRYPTO_MAX = 65536;                 // cap bytes shipped per event
+var CRYPTO_MAX_PER_SEC = 200;           // flood guard (schannel TLS runs through BCrypt)
+var _cryptoHooked = {};                 // export-pointer string -> true (dedup guard)
+var _cryptoRate = { sec: 0, count: 0, dropped: 0 };
+
+function _cryptoAllowed() {
+    var now = Math.floor(Date.now() / 1000);
+    if (now !== _cryptoRate.sec) {
+        if (_cryptoRate.dropped > 0)
+            console.log("[FRIDA crypto] rate-limited, dropped " + _cryptoRate.dropped + " events last second");
+        _cryptoRate.sec = now; _cryptoRate.count = 0; _cryptoRate.dropped = 0;
+    }
+    if (_cryptoRate.count >= CRYPTO_MAX_PER_SEC) { _cryptoRate.dropped++; return false; }
+    _cryptoRate.count++;
+    return true;
+}
+
+function _readBlob(blobPtr) {
+    try {
+        if (!blobPtr || blobPtr.isNull()) return null;
+        var cb = blobPtr.readU32();
+        if (cb <= 0) return null;
+        var pb = blobPtr.add(Process.pointerSize).readPointer();
+        if (pb.isNull()) return null;
+        return { len: cb, buf: Memory.readByteArray(pb, Math.min(cb, CRYPTO_MAX)) };
+    } catch (e) { return null; }
+}
+
+function _readRaw(p, len) {
+    try {
+        if (!p || p.isNull() || len <= 0) return null;
+        return Memory.readByteArray(p, Math.min(len, CRYPTO_MAX));
+    } catch (e) { return null; }
+}
+
+function _emitCrypto(api, op, buf, len, extra) {
+    if (!_cryptoAllowed()) return;
+    try {
+        var payload = { type: "crypto_event", api: api, op: op, size: len, _ts: _procTs() };
+        if (extra) { for (var k in extra) payload[k] = extra[k]; }
+        if (buf) send(payload, buf); else send(payload);
+    } catch (e) { console.log("[FRIDA crypto] emit error: " + e); }
+}
+
+function _attachCryptoOnce(mod, name, callbacks) {
+    var p = Module.findExportByName(mod, name);
+    if (!p) return;
+    var key = p.toString();
+    if (_cryptoHooked[key]) return;
+    try {
+        Interceptor.attach(p, callbacks);
+        _cryptoHooked[key] = true;
+    } catch (e) { console.log("[FRIDA crypto] attach " + name + " error: " + e); }
+}
+
+function hookCrypto() {
+    // DPAPI: CryptProtectData(pDataIn,szDescr,pEntropy,pRes,pPrompt,dwFlags,pDataOut)
+    _attachCryptoOnce("crypt32.dll", "CryptProtectData", {
+        onEnter: function (args) {
+            var blob = _readBlob(args[0]);
+            if (!blob) return;
+            var flags = 0; try { flags = args[5].toInt32(); } catch (e) {}
+            var hasEntropy = false; try { hasEntropy = !args[2].isNull(); } catch (e) {}
+            _emitCrypto("CryptProtectData", "protect", blob.buf, blob.len, {
+                dpapi_local_machine: (flags & CRYPTPROTECT_LOCAL_MACHINE) !== 0,
+                dpapi_entropy: hasEntropy
+            });
+        }
+    });
+    // DPAPI: CryptUnprotectData(pDataIn,ppszDescr,pEntropy,pRes,pPrompt,dwFlags,pDataOut)
+    _attachCryptoOnce("crypt32.dll", "CryptUnprotectData", {
+        onEnter: function (args) {
+            this.pDataOut = args[6];
+            try { this.hasEntropy = !args[2].isNull(); } catch (e) { this.hasEntropy = false; }
+        },
+        onLeave: function (retval) {
+            if (retval.isNull() || retval.toInt32() === 0) return;   // BOOL FALSE
+            var blob = _readBlob(this.pDataOut);
+            if (blob) _emitCrypto("CryptUnprotectData", "unprotect", blob.buf, blob.len, { dpapi_entropy: this.hasEntropy });
+        }
+    });
+    // DPAPI in-memory: CryptProtectMemory(pData,cbData,dwFlags) — plaintext in place on entry
+    _attachCryptoOnce("crypt32.dll", "CryptProtectMemory", {
+        onEnter: function (args) {
+            var len = 0; try { len = args[1].toInt32(); } catch (e) {}
+            var buf = _readRaw(args[0], len);
+            if (buf) _emitCrypto("CryptProtectMemory", "protect", buf, len, null);
+        }
+    });
+    // CryptUnprotectMemory(pData,cbData,dwFlags) — plaintext in place on leave
+    _attachCryptoOnce("crypt32.dll", "CryptUnprotectMemory", {
+        onEnter: function (args) { this.p = args[0]; try { this.len = args[1].toInt32(); } catch (e) { this.len = 0; } },
+        onLeave: function (retval) {
+            if (retval.isNull() || retval.toInt32() === 0) return;
+            var buf = _readRaw(this.p, this.len);
+            if (buf) _emitCrypto("CryptUnprotectMemory", "unprotect", buf, this.len, null);
+        }
+    });
+
+    // CNG/BCrypt: BCryptEncrypt(hKey,pbInput,cbInput,pPad,pbIV,cbIV,pbOutput,cbOutput,pcbResult,dwFlags)
+    _attachCryptoOnce("bcrypt.dll", "BCryptEncrypt", {
+        onEnter: function (args) {
+            try { if (args[6].isNull()) return; } catch (e) { return; }   // pbOutput NULL = size query, skip
+            var len = 0; try { len = args[2].toInt32(); } catch (e) {}
+            if (len <= 0) return;
+            var buf = _readRaw(args[1], len);       // plaintext input
+            if (buf) _emitCrypto("BCryptEncrypt", "encrypt", buf, len, null);
+        }
+    });
+    // BCryptDecrypt(...): recovered plaintext lands in pbOutput, length *pcbResult
+    _attachCryptoOnce("bcrypt.dll", "BCryptDecrypt", {
+        onEnter: function (args) { this.pbOutput = args[6]; this.pcbResult = args[8]; },
+        onLeave: function (retval) {
+            try {
+                if (retval.toInt32() !== 0) return;   // NTSTATUS != STATUS_SUCCESS
+                if (!this.pbOutput || this.pbOutput.isNull() || this.pcbResult.isNull()) return;
+                var len = this.pcbResult.readU32();
+                var buf = _readRaw(this.pbOutput, len);
+                if (buf) _emitCrypto("BCryptDecrypt", "decrypt", buf, len, null);
+            } catch (e) {}
+        }
+    });
+
+    // Legacy CryptoAPI: CryptEncrypt(hKey,hHash,Final,dwFlags,pbData,pdwDataLen,dwBufLen)
+    // pbData holds plaintext on entry; *pdwDataLen is its length.
+    var encMod = Module.findExportByName("advapi32.dll", "CryptEncrypt") ? "advapi32.dll" : "crypt32.dll";
+    _attachCryptoOnce(encMod, "CryptEncrypt", {
+        onEnter: function (args) {
+            try {
+                if (args[4].isNull() || args[5].isNull()) return;    // size query
+                var len = args[5].readU32();
+                var buf = _readRaw(args[4], len);
+                if (buf) _emitCrypto("CryptEncrypt", "encrypt", buf, len, null);
+            } catch (e) {}
+        }
+    });
+    // CryptDecrypt(hKey,hHash,Final,dwFlags,pbData,pdwDataLen): decrypted plaintext in pbData on leave
+    var decMod = Module.findExportByName("advapi32.dll", "CryptDecrypt") ? "advapi32.dll" : "crypt32.dll";
+    _attachCryptoOnce(decMod, "CryptDecrypt", {
+        onEnter: function (args) { this.pbData = args[4]; this.pLen = args[5]; },
+        onLeave: function (retval) {
+            try {
+                if (retval.isNull() || retval.toInt32() === 0) return;
+                if (this.pbData.isNull() || this.pLen.isNull()) return;
+                var len = this.pLen.readU32();
+                var buf = _readRaw(this.pbData, len);
+                if (buf) _emitCrypto("CryptDecrypt", "decrypt", buf, len, null);
+            } catch (e) {}
+        }
+    });
+}
+
+hookCrypto();
+// bcrypt/crypt32/advapi32 can load after startup; re-scan with a dedup guard so we
+// never double-attach the same export (the guard is what makes this interval safe).
+setInterval(hookCrypto, 3000);
+
+// ── SCHANNEL (SSPI) PLAINTEXT ─────────────────────────────────────────────────
+// Native Windows TLS goes through secur32/sspicli EncryptMessage/DecryptMessage —
+// used by .NET SslStream, WinHTTP, LDAPS, SQL TDS and any raw SChannel consumer,
+// none of which touch OpenSSL. This is the biggest remaining plaintext blind spot.
+// SChannel encrypts/decrypts IN PLACE inside a SecBufferDesc: on EncryptMessage
+// entry the SECBUFFER_DATA buffer holds outbound plaintext; on DecryptMessage
+// leave it holds the inbound plaintext. We read that one buffer and ship it
+// through the existing tcp_out/tcp_in pipeline (History tab + rule scan), so no
+// backend/UI change is needed. Cert pinning is already neutralized by ssl_unpin.js.
+//
+// SecBufferDesc { ULONG ulVersion; ULONG cBuffers; PSecBuffer pBuffers@+8 }
+// SecBuffer     { ULONG cbBuffer@0; ULONG BufferType@4; void* pvBuffer@+8 }
+// sizeof(SecBuffer) = 8 + Process.pointerSize (12 x86 / 16 x64). SECBUFFER_DATA = 1.
+
+var SECBUFFER_DATA = 1;
+var SECBUFFER_ATTRMASK = 0xF0000000;   // READONLY etc. live in the high nibble
+
+function _readSecBufferData(pDesc) {
+    try {
+        if (!pDesc || pDesc.isNull()) return null;
+        var cBuffers = pDesc.add(4).readU32();
+        if (cBuffers <= 0 || cBuffers > 16) return null;
+        var pBuffers = pDesc.add(8).readPointer();
+        if (pBuffers.isNull()) return null;
+        var stride = 8 + Process.pointerSize;
+        for (var i = 0; i < cBuffers; i++) {
+            var sb = pBuffers.add(i * stride);
+            var cbBuffer = sb.readU32();
+            var bufType = sb.add(4).readU32() & ~SECBUFFER_ATTRMASK;
+            if (bufType === SECBUFFER_DATA && cbBuffer > 0) {
+                var pv = sb.add(8).readPointer();
+                if (!pv.isNull())
+                    return { len: cbBuffer, buf: Memory.readByteArray(pv, Math.min(cbBuffer, CRYPTO_MAX)) };
+            }
+        }
+    } catch (e) {}
+    return null;
+}
+
+function hookSChannel() {
+    ["secur32.dll", "sspicli.dll"].forEach(function (mod) {
+        // EncryptMessage(phContext, fQOP, pMessage, MessageSeqNo) — plaintext on ENTRY
+        _attachCryptoOnce(mod, "EncryptMessage", {
+            onEnter: function (args) {
+                var d = _readSecBufferData(args[2]);
+                if (d && d.buf)
+                    send({ type: "tcp_out", socket: 0, dest: "SChannel (" + mod + ")", size: d.len, direction: "Outgoing (EncryptMessage)" }, d.buf);
+            }
+        });
+        // DecryptMessage(phContext, pMessage, MessageSeqNo, pfQOP) — plaintext on LEAVE
+        _attachCryptoOnce(mod, "DecryptMessage", {
+            onEnter: function (args) { this.pMsg = args[1]; },
+            onLeave: function (retval) {
+                try {
+                    if (retval.toInt32() !== 0) return;   // SEC_E_OK == 0 (data decrypted)
+                    var d = _readSecBufferData(this.pMsg);
+                    if (d && d.buf)
+                        send({ type: "tcp_in", socket: 0, dest: "SChannel (" + mod + ")", size: d.len, direction: "Incoming (DecryptMessage)" }, d.buf);
+                } catch (e) {}
+            }
+        });
+    });
+}
+
+hookSChannel();
+// Short interval + the LoadLibrary re-trigger above catch secur32/sspicli when .NET
+// or WinHTTP loads TLS lazily after our script is already running.
+setInterval(hookSChannel, 1000);
 
 console.log("[*] Safiye Frida Script loaded.");

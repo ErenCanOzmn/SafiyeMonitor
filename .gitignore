@@ -41,3 +41,6 @@ GELISTIRME_PLANI.txt
 *.exe
 *.dll
 *.pdb
+
+# Local demo / test targets (kept locally, not published)
+demo/
