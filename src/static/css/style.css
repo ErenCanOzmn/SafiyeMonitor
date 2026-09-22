@@ -562,6 +562,54 @@ input:checked + .slider::before {
 .hist-path       { color: var(--text-primary); }
 .hist-dest-inline { color: var(--text-tertiary); font-size: 0.75rem; }
 
+/* Request/response correlation badge + paired-row highlight */
+.hist-link {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 6px;
+    font-size: 0.66rem;
+    font-family: var(--font-mono);
+    color: var(--primary);
+    background: var(--primary-dim);
+    border: 1px solid rgba(122,162,247,0.35);
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    vertical-align: middle;
+}
+.hist-link:hover { background: var(--primary); color: #fff; }
+.data-table tbody tr.hist-paired > td {
+    background: rgba(122,162,247,0.09) !important;
+    box-shadow: inset 3px 0 0 var(--primary);
+}
+
+/* Detail-panel correlation link (jump between a request and its response) */
+.hist-detail-link {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 8px;
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    text-transform: none;
+    font-family: var(--font-mono);
+    color: var(--accent);
+    background: rgba(137,180,250,0.12);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.hist-detail-link:hover { background: var(--accent); color: var(--bg-base); }
+.hist-detail-note {
+    font-size: 0.64rem;
+    font-weight: 400;
+    letter-spacing: 0.3px;
+    text-transform: none;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+}
+
 /* Status tags */
 .tag-success { color: var(--accent); }
 .tag-failed  { color: var(--red); }
@@ -668,6 +716,87 @@ input:checked + .slider::before {
 }
 
 /* ── Repeater tab ────────────────────────────────────────── */
+.repeater-workspace {
+    display: flex;
+    height: 100%;
+    min-height: 0;
+    background: var(--bg-surface);
+}
+.repeater-sidebar {
+    width: 260px;
+    min-width: 220px;
+    max-width: 340px;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border-color);
+    background: var(--bg-panel);
+    overflow: hidden;
+}
+.repeater-sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.9px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+}
+.repeater-new-tab-btn {
+    padding: 3px 9px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    background: var(--border-light);
+    color: var(--text-primary);
+    border-radius: 4px;
+}
+.repeater-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+}
+.repeater-list .btn {
+    width: 100%;
+    display: block;
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    text-align: left;
+    min-height: 34px;
+    line-height: 18px;
+    padding: 7px 10px;
+    margin: 0 0 7px 0;
+    border-radius: 7px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    text-transform: none;
+    color: #c8d3f5;
+    background: #0f1320;
+    border: 1px solid rgba(122,162,247,0.32);
+}
+.repeater-list .btn:hover {
+    color: #ffffff;
+    border-color: rgba(122,162,247,0.65);
+    background: #141a2a;
+}
+.repeater-list .active-repeater-tab {
+    color: #ffffff;
+    background: rgba(122,162,247,0.18);
+    border-color: #7aa2f7;
+}
 .repeater-tabbar {
     display: flex;
     padding: 6px 12px;
@@ -930,10 +1059,6 @@ input:checked + .slider::before {
     border-left: 3px solid var(--primary);
 }
 .data-table th { color: #7f8cb5; }
-
-/* Density toggle (button in topbar sets body.density-compact). */
-body.density-compact .data-table th { padding: 6px 12px; }
-body.density-compact .data-table td { padding: 4px 12px; font-size: 0.74rem; }
 
 /* Reusable chip / badge components to replace scattered inline styles. */
 .sf-chip {

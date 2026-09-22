@@ -38,6 +38,81 @@ var WSARecvPtr = Module.findExportByName("ws2_32.dll", "WSARecv");
 var connectPtr = Module.findExportByName("ws2_32.dll", "connect");
 
 var socketMap = {};
+
+// ── Destination resolution ────────────────────────────────────────────────
+// socketMap is populated eagerly by the connect()/WSAConnect() hooks, but many
+// apps reach the network through paths those hooks never see: IPv6 sockets,
+// ConnectEx/AcceptEx (async winsock used by browsers, .NET, curl), or a socket
+// that was already connected before we attached. For all of those we ask the
+// OS directly with getpeername(), which returns the real remote address of any
+// connected socket regardless of how the connection was made. The result is
+// cached back into socketMap so we only pay the syscall once per socket.
+var getpeernamePtr = Module.findExportByName("ws2_32.dll", "getpeername");
+var getpeernameFn = getpeernamePtr
+    ? new NativeFunction(getpeernamePtr, 'int', ['int', 'pointer', 'pointer'])
+    : null;
+
+function fmtIPv6(bytes) {
+    // bytes: 16-element array of octets → compressed "[a:b::c]" form.
+    var parts = [];
+    for (var i = 0; i < 16; i += 2) {
+        parts.push((((bytes[i] & 0xFF) << 8) | (bytes[i + 1] & 0xFF)).toString(16));
+    }
+    // Compress the longest run of zero groups into "::".
+    var bestStart = -1, bestLen = 0, curStart = -1, curLen = 0;
+    for (var j = 0; j < 8; j++) {
+        if (parts[j] === "0") {
+            if (curStart < 0) { curStart = j; curLen = 1; } else { curLen++; }
+            if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
+        } else { curStart = -1; curLen = 0; }
+    }
+    if (bestLen > 1) {
+        var head = parts.slice(0, bestStart).join(":");
+        var tail = parts.slice(bestStart + bestLen).join(":");
+        return "[" + head + "::" + tail + "]";
+    }
+    return "[" + parts.join(":") + "]";
+}
+
+// Parse a sockaddr (AF_INET / AF_INET6) at addrPtr into "ip:port" (or null).
+function parseSockaddr(addrPtr) {
+    try {
+        var family = addrPtr.readU16();
+        if (family === 2) {          // AF_INET (IPv4)
+            var port = ((addrPtr.add(2).readU8() & 0xFF) << 8) | (addrPtr.add(3).readU8() & 0xFF);
+            var ip = addrPtr.add(4).readU8() + "." + addrPtr.add(5).readU8() + "." +
+                     addrPtr.add(6).readU8() + "." + addrPtr.add(7).readU8();
+            return ip + ":" + port;
+        }
+        if (family === 23) {         // AF_INET6 (IPv6)
+            var port6 = ((addrPtr.add(2).readU8() & 0xFF) << 8) | (addrPtr.add(3).readU8() & 0xFF);
+            var b = [];
+            for (var k = 0; k < 16; k++) b.push(addrPtr.add(8 + k).readU8() & 0xFF);
+            return fmtIPv6(b) + ":" + port6;
+        }
+    } catch (e) { }
+    return null;
+}
+
+// Return the best-known destination for a socket, querying getpeername() as a
+// fallback and caching any success. Never caches "Unknown", so a socket that is
+// not connected yet can still resolve on a later send/recv.
+function resolveDest(socket) {
+    var known = socketMap[socket];
+    if (known && known !== "Unknown") return known;
+    if (getpeernameFn === null || !socket) return known || "Unknown";
+    try {
+        var addrBuf = Memory.alloc(128);   // sockaddr_storage
+        var lenBuf = Memory.alloc(4);
+        lenBuf.writeInt(128);
+        if (getpeernameFn(socket, addrBuf, lenBuf) === 0) {
+            var d = parseSockaddr(addrBuf);
+            if (d) { socketMap[socket] = d; return d; }
+        }
+    } catch (e) { }
+    return known || "Unknown";
+}
+
 var intercept_mode = false;
 var packetCounter = 0;
 
@@ -190,6 +265,79 @@ rpc.exports = {
         return results;
     },
 
+    // Scan readable memory for credential-like material (Tier-2: memory credential
+    // scan + post-logout cleanup). Values are masked and fingerprinted — never sent
+    // raw over the message bus. The fingerprint (fp) lets the backend compare a
+    // pre-logout scan against a post-logout scan: an fp present in BOTH means the
+    // app failed to zero that secret on logout.
+    scanmemorycreds: function () {
+        var CRED_RES = [
+            { cat: "private-key",       re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/ },
+            { cat: "jwt",               re: /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/ },
+            { cat: "aws-access-key",    re: /\bAKIA[0-9A-Z]{16}\b/ },
+            { cat: "connection-string", re: /(?:Data Source|Server|Initial Catalog)\s*=[^;]{1,80};[\s\S]{0,120}?(?:Password|Pwd)\s*=[^;]{1,80}/i },
+            { cat: "password-assign",   re: /(?:password|passwd|pwd|sifre|parola)\s*[=:]\s*[^\s"'<>&;]{3,80}/i },
+            { cat: "bearer-token",      re: /(?:bearer\s+|api[_-]?key\s*[=:]\s*|access[_-]?token\s*[=:]\s*)[A-Za-z0-9._\-]{12,}/i },
+            { cat: "basic-auth",        re: /Authorization:\s*Basic\s+[A-Za-z0-9+/=]{8,}/i }
+        ];
+        function djb2(s) { var h = 5381; for (var i = 0; i < s.length; i++) { h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; } return h.toString(16); }
+        function maskv(s) { if (s.length <= 6) return s.charAt(0) + "****"; return s.substr(0, 4) + "****" + s.substr(s.length - 2); }
+
+        var results = [];
+        var GLOBAL_BUDGET = 256 * 1024 * 1024;  // scan at most 256MB total
+        var TIME_BUDGET   = 8000;               // ms — bound the in-process thread freeze
+        var WINDOW        = 4 * 1024 * 1024;     // 4MB read window (walk the WHOLE range, not just the head)
+        var RUN_MAX       = 2048;                // cap one string run (avoid O(n^2) + pathological regex)
+        var RESULT_MAX    = 500;
+        var t0 = Date.now(), scanned = 0;
+        function overBudget() { return results.length > RESULT_MAX || scanned >= GLOBAL_BUDGET || (Date.now() - t0) > TIME_BUDGET; }
+
+        function testStr(s, addr, enc) {
+            if (s.length < 6 || isFridaNoise(s)) return;
+            for (var k = 0; k < CRED_RES.length; k++) {
+                var m = CRED_RES[k].re.exec(s);
+                if (m) {
+                    var v = m[0];
+                    results.push({ category: CRED_RES[k].cat, addr: addr, enc: enc,
+                                   masked: maskv(v), fp: djb2(v), len: v.length });
+                    return;
+                }
+            }
+        }
+        function scanChunk(u8, baseAddr) {
+            var codes = [], start = -1, i;
+            for (i = 0; i < u8.length; i++) {                       // ASCII runs
+                var c = u8[i];
+                if (c >= 32 && c <= 126) { if (start < 0) start = i; if (codes.length < RUN_MAX) codes.push(c); }
+                else { if (codes.length > 6) testStr(String.fromCharCode.apply(null, codes), baseAddr.add(start).toString(), "ascii"); codes = []; start = -1; }
+                if (results.length > RESULT_MAX) return;
+            }
+            if (codes.length > 6) testStr(String.fromCharCode.apply(null, codes), baseAddr.add(start).toString(), "ascii");
+            var w = [], wstart = -1, j;
+            for (j = 0; j + 1 < u8.length; j += 2) {                // UTF-16LE runs (Windows wide strings hold passwords)
+                if (u8[j + 1] === 0 && u8[j] >= 32 && u8[j] <= 126) { if (wstart < 0) wstart = j; if (w.length < RUN_MAX) w.push(u8[j]); }
+                else { if (w.length > 6) testStr(String.fromCharCode.apply(null, w), baseAddr.add(wstart).toString(), "utf16"); w = []; wstart = -1; }
+                if (results.length > RESULT_MAX) return;
+            }
+            if (w.length > 6) testStr(String.fromCharCode.apply(null, w), baseAddr.add(wstart).toString(), "utf16");
+        }
+
+        var ranges = Process.enumerateRanges({ protection: 'r--', coalesce: true });  // includes rw- heap
+        for (var r = 0; r < ranges.length && !overBudget(); r++) {
+            var range = ranges[r], off = 0;
+            while (off < range.size && !overBudget()) {
+                var take = Math.min(WINDOW, range.size - off);
+                try {
+                    var buf = Memory.readByteArray(range.base.add(off), take);
+                    if (buf !== null) scanChunk(new Uint8Array(buf), range.base.add(off));
+                } catch (e) { }
+                scanned += take; off += take;
+            }
+        }
+        return { findings: results, scanned_bytes: scanned,
+                 truncated: (scanned >= GLOBAL_BUDGET || (Date.now() - t0) > TIME_BUDGET) };
+    },
+
     repeatersend: function(socketId, payload, isHex) {
         try {
             if (!sendPtr) return "error:send() not found";
@@ -298,47 +446,82 @@ rpc.exports = {
 };
 
 // Deserialization Magic Bytes Signatures
-var MAGIC_BYTES = {
-    "Java Serialization": [0xAC, 0xED],
-    "Python Pickle (v2+)": [0x80, 0x02],
-    "Python Pickle (v3+)": [0x80, 0x03],
-    "Python Pickle (v4+)": [0x80, 0x04],
-    ".NET BinaryFormatter": [0x00, 0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF],
-    "PHP Serialized Object": [0x4F, 0x3A] // "O:"
-};
+// TLS record framing: content type 0x14-0x17 (ChangeCipherSpec/Alert/Handshake/
+// AppData) followed by version 0x03,0x00-0x04. Ciphertext is random bytes, so
+// scanning it for magic bytes is the single biggest false-positive source —
+// skip it outright.
+function _looksLikeTls(u8) {
+    return u8.length >= 3 && u8[0] >= 0x14 && u8[0] <= 0x17 &&
+           u8[1] === 0x03 && u8[2] <= 0x04;
+}
+
+// Offset just past the first CRLFCRLF (HTTP header/body boundary), or -1.
+function _httpBodyStart(u8) {
+    var lim = Math.min(u8.length - 4, 4096);
+    for (var i = 0; i <= lim; i++) {
+        if (u8[i] === 0x0d && u8[i + 1] === 0x0a && u8[i + 2] === 0x0d && u8[i + 3] === 0x0a)
+            return i + 4;
+    }
+    return -1;
+}
+
+function _isDigit(b) { return b >= 0x30 && b <= 0x39; }
+
+// Return a serialization format name if a REAL serialized object begins exactly
+// at position p — full, specific signatures instead of a 2-byte prefix at an
+// arbitrary offset (which matches random data ~constantly).
+function _deserAt(u8, p) {
+    var n = u8.length;
+    if (p < 0 || p + 2 > n) return null;
+    // Java: STREAM_MAGIC 0xACED + STREAM_VERSION 0x0005
+    if (p + 4 <= n && u8[p] === 0xAC && u8[p + 1] === 0xED && u8[p + 2] === 0x00 && u8[p + 3] === 0x05)
+        return "Java Serialization";
+    // .NET BinaryFormatter header: 00 01 00 00 00 FF FF FF FF
+    if (p + 9 <= n && u8[p] === 0x00 && u8[p + 1] === 0x01 && u8[p + 2] === 0x00 &&
+        u8[p + 3] === 0x00 && u8[p + 4] === 0x00 && u8[p + 5] === 0xFF && u8[p + 6] === 0xFF &&
+        u8[p + 7] === 0xFF && u8[p + 8] === 0xFF)
+        return ".NET BinaryFormatter";
+    // Python pickle: PROTO opcode 0x80 + version 2/3/4, AND a STOP '.' (0x2E) as
+    // the final byte of the payload — a real pickle always ends with STOP.
+    if (u8[p] === 0x80 && (u8[p + 1] === 0x02 || u8[p + 1] === 0x03 || u8[p + 1] === 0x04) && u8[n - 1] === 0x2E)
+        return "Python Pickle";
+    // PHP serialized object: O:<len>:"   → 4F 3A <ascii digits> 3A 22
+    if (u8[p] === 0x4F && u8[p + 1] === 0x3A) {
+        var q = p + 2, d = 0;
+        while (q < n && _isDigit(u8[q])) { q++; d++; }
+        if (d > 0 && q + 1 < n && u8[q] === 0x3A && u8[q + 1] === 0x22)
+            return "PHP Serialized Object";
+    }
+    return null;
+}
 
 function checkDeserialization(data, socket, dest, direction) {
-    if (!data || data.byteLength < 2) return;
-    var uint8 = new Uint8Array(data);
-    // Scan a bounded window for magic bytes at ANY offset, not just offset 0, so
-    // payloads wrapped in HTTP/framing headers are still detected.
-    var maxScan = Math.min(uint8.length, 4096);
-    for (var name in MAGIC_BYTES) {
-        var signature = MAGIC_BYTES[name];
-        if (uint8.length < signature.length) continue;
-        var limit = maxScan - signature.length;
-        for (var off = 0; off <= limit; off++) {
-            var match = true;
-            for (var i = 0; i < signature.length; i++) {
-                if (uint8[off + i] !== signature[i]) { match = false; break; }
-            }
-            if (match) {
-                send({
-                    type: "alert",
-                    severity: "HIGH",
-                    title: "Insecure Deserialization Detected!",
-                    message: "Detected " + name + " signature at offset " + off + " in " + direction + " traffic to " + dest,
-                    socket: socket
-                });
-                return;
-            }
+    if (!data || data.byteLength < 4) return;
+    var u8 = new Uint8Array(data);
+    if (_looksLikeTls(u8)) return;   // encrypted record — nothing to scan here
+    // Anchor only at meaningful positions: the payload start and the HTTP body
+    // start (for a serialized blob POSTed inside an HTTP request).
+    var positions = [0];
+    var b = _httpBodyStart(u8);
+    if (b > 0) positions.push(b);
+    for (var pi = 0; pi < positions.length; pi++) {
+        var fmt = _deserAt(u8, positions[pi]);
+        if (fmt) {
+            send({
+                type: "alert",
+                severity: "HIGH",
+                title: "Insecure Deserialization Detected!",
+                message: "Detected " + fmt + " payload at offset " + positions[pi] + " in " + direction + " traffic to " + dest,
+                socket: socket
+            });
+            return;
         }
     }
 }
 
 function handleSend(socket, bufPtr, len, name) {
     if (inRepeaterSend) return "forward";
-    var dest = socketMap[socket] || "Unknown";
+    var dest = resolveDest(socket);
     var bufData = Memory.readByteArray(bufPtr, len);
 
     checkDeserialization(bufData, socket, dest, "Outgoing (" + name + ")");
@@ -416,11 +599,8 @@ if (connectPtr !== null) {
                 var namePtr = args[1];
                 var namelen = args[2].toInt32();
                 if (!namePtr.isNull() && namelen >= 16) {
-                    var family = namePtr.readU16();
-                    if (family === 2) {
-                        var port = ((namePtr.add(2).readU8() & 0xFF) << 8) | (namePtr.add(3).readU8() & 0xFF);
-                        var ip = namePtr.add(4).readU8() + "." + namePtr.add(5).readU8() + "." + namePtr.add(6).readU8() + "." + namePtr.add(7).readU8();
-                        var destInfo = ip + ":" + port;
+                    var destInfo = parseSockaddr(namePtr);   // IPv4 + IPv6
+                    if (destInfo) {
                         socketMap[this.socket] = destInfo;
                         this.destInfo = destInfo;
                     }
@@ -435,6 +615,42 @@ if (connectPtr !== null) {
                     dest: this.destInfo,
                     size: 0,
                     direction: "Connection (connect)",
+                    status: retval.toInt32() === 0 ? "SUCCESS" : "PENDING/ERROR"
+                });
+            }
+        }
+    });
+}
+
+// WSAConnect: the async connect path used by browsers, .NET and curl. Same
+// sockaddr layout as connect(), so it feeds socketMap the same way; sockets
+// connected via ConnectEx (no plain export) still resolve lazily through
+// getpeername() in resolveDest().
+var WSAConnectPtr = Module.findExportByName("ws2_32.dll", "WSAConnect");
+if (WSAConnectPtr !== null) {
+    Interceptor.attach(WSAConnectPtr, {
+        onEnter: function (args) {
+            try {
+                this.socket = args[0].toInt32();
+                var namePtr = args[1];
+                var namelen = args[2].toInt32();
+                if (!namePtr.isNull() && namelen >= 16) {
+                    var destInfo = parseSockaddr(namePtr);
+                    if (destInfo) {
+                        socketMap[this.socket] = destInfo;
+                        this.destInfo = destInfo;
+                    }
+                }
+            } catch (e) { }
+        },
+        onLeave: function (retval) {
+            if (this.destInfo) {
+                send({
+                    type: "tcp_out",
+                    socket: this.socket,
+                    dest: this.destInfo,
+                    size: 0,
+                    direction: "Connection (WSAConnect)",
                     status: retval.toInt32() === 0 ? "SUCCESS" : "PENDING/ERROR"
                 });
             }
@@ -607,7 +823,7 @@ if (recvPtr !== null) {
                 send({
                     type: "tcp_in",
                     socket: this.socket,
-                    dest: socketMap[this.socket] || "Unknown",
+                    dest: resolveDest(this.socket),
                     size: n,
                     direction: "Incoming (recv)"
                 }, bufData);
@@ -732,7 +948,7 @@ if (WSARecvPtr !== null) {
                         send({
                             type: "tcp_in",
                             socket: this.socket,
-                            dest: socketMap[this.socket] || "Unknown",
+                            dest: resolveDest(this.socket),
                             size: bytesRead,
                             direction: "Incoming (WSARecv)"
                         }, collected.buffer);
@@ -938,8 +1154,8 @@ function hookSSL() {
     sslMods.forEach(function (m) {
         var w = Module.findExportByName(m, "SSL_write");
         var r = Module.findExportByName(m, "SSL_read");
-        if (w) Interceptor.attach(w, { onEnter: function (args) { var len = args[2].toInt32(); if (len > 0) send({ type: "tcp_out", socket: 0, dest: "OpenSSL (" + m + ")", size: len, direction: "Outgoing (SSL_write)" }, Memory.readByteArray(args[1], len)); } });
-        if (r) Interceptor.attach(r, { onLeave: function (retval) { var len = retval.toInt32(); if (len > 0) send({ type: "tcp_out", socket: 0, dest: "OpenSSL (" + m + ")", size: len, direction: "Incoming (SSL_read)" }, Memory.readByteArray(this.bufPtr, len)); }, onEnter: function (args) { this.bufPtr = args[1]; } });
+        if (w) Interceptor.attach(w, { onEnter: function (args) { var len = args[2].toInt32(); if (len > 0) send({ type: "tcp_out", socket: 0, conn: "ssl:" + args[0].toString(), dest: "OpenSSL (" + m + ")", size: len, direction: "Outgoing (SSL_write)" }, Memory.readByteArray(args[1], len)); } });
+        if (r) Interceptor.attach(r, { onLeave: function (retval) { var len = retval.toInt32(); if (len > 0) send({ type: "tcp_in", socket: 0, conn: this.ssl, dest: "OpenSSL (" + m + ")", size: len, direction: "Incoming (SSL_read)" }, Memory.readByteArray(this.bufPtr, len)); }, onEnter: function (args) { this.bufPtr = args[1]; this.ssl = "ssl:" + args[0].toString(); } });
     });
 }
 hookSSL();
@@ -1272,6 +1488,21 @@ function _readSecBufferData(pDesc) {
     return null;
 }
 
+// A TLS connection has socket=0 at the crypto layer, so the UI cannot pair a
+// request with its response by socket there. The SSPI context handle (phContext,
+// a SecHandle = {dwLower, dwUpper}) is stable for the life of one TLS connection,
+// so we ship it as `conn` and the UI correlates plaintext req/resp by it.
+function _ctxId(phContext) {
+    try {
+        if (phContext && !phContext.isNull()) {
+            var lo = phContext.readPointer();
+            var hi = phContext.add(Process.pointerSize).readPointer();
+            return "sc:" + lo.toString() + ":" + hi.toString();
+        }
+    } catch (e) {}
+    return "sc:0";
+}
+
 function hookSChannel() {
     ["secur32.dll", "sspicli.dll"].forEach(function (mod) {
         // EncryptMessage(phContext, fQOP, pMessage, MessageSeqNo) — plaintext on ENTRY
@@ -1279,18 +1510,18 @@ function hookSChannel() {
             onEnter: function (args) {
                 var d = _readSecBufferData(args[2]);
                 if (d && d.buf)
-                    send({ type: "tcp_out", socket: 0, dest: "SChannel (" + mod + ")", size: d.len, direction: "Outgoing (EncryptMessage)" }, d.buf);
+                    send({ type: "tcp_out", socket: 0, conn: _ctxId(args[0]), dest: "SChannel (" + mod + ")", size: d.len, direction: "Outgoing (EncryptMessage)" }, d.buf);
             }
         });
         // DecryptMessage(phContext, pMessage, MessageSeqNo, pfQOP) — plaintext on LEAVE
         _attachCryptoOnce(mod, "DecryptMessage", {
-            onEnter: function (args) { this.pMsg = args[1]; },
+            onEnter: function (args) { this.pMsg = args[1]; this.conn = _ctxId(args[0]); },
             onLeave: function (retval) {
                 try {
                     if (retval.toInt32() !== 0) return;   // SEC_E_OK == 0 (data decrypted)
                     var d = _readSecBufferData(this.pMsg);
                     if (d && d.buf)
-                        send({ type: "tcp_in", socket: 0, dest: "SChannel (" + mod + ")", size: d.len, direction: "Incoming (DecryptMessage)" }, d.buf);
+                        send({ type: "tcp_in", socket: 0, conn: this.conn, dest: "SChannel (" + mod + ")", size: d.len, direction: "Incoming (DecryptMessage)" }, d.buf);
                 } catch (e) {}
             }
         });

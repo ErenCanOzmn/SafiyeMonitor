@@ -44,3 +44,27 @@ GELISTIRME_PLANI.txt
 
 # Local demo / test targets (kept locally, not published)
 demo/
+
+# Per-session auth token (runtime secret, regenerated each start)
+.safiye_session.token
+src/.safiye_session.token
+
+# Internal multi-agent development docs (kept local, NOT for the public repo)
+COORDINATION.md
+QA_PUNCHLIST.md
+todo.txt
+TEST_EXECUTABLES.txt
+TEST_EXES.txt
+
+# Local test fixtures / lab targets (kept locally, not published)
+test/
+
+# Local checks and documentation demo (kept locally, not published)
+/tests/
+/docs/readme-demo/
+
+# Local application data and artwork generation notes
+/src/STOK.MXF
+/assets/safiye-comic-prompt.md
+/assets/safiye-reference-prompts.md
+/assets/safiye-welcome-prompt.md

@@ -24,18 +24,37 @@ import requests
 server = Server("safiye-analyzer")
 SAFIYE_API = os.environ.get("SAFIYE_API", "http://127.0.0.1:5000")
 
+# The Safiye server requires a per-session token on every /api call. It writes the
+# token to a co-located file at startup; we read it (re-reading each call so a
+# server restart with a fresh token just works). Env SAFIYE_TOKEN overrides.
+_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".safiye_session.token")
+
+def _token() -> str:
+    t = os.environ.get("SAFIYE_TOKEN")
+    if t:
+        return t
+    try:
+        with open(_TOKEN_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+def _headers() -> dict:
+    tok = _token()
+    return {"X-Safiye-Token": tok} if tok else {}
+
 
 def _log(message: str) -> None:
     """Fire-and-forget: post a progress log to the Safiye UI."""
     try:
-        requests.post(f"{SAFIYE_API}/api/mcp_log", json={"message": message}, timeout=5)
+        requests.post(f"{SAFIYE_API}/api/mcp_log", json={"message": message}, headers=_headers(), timeout=5)
     except Exception:
         pass
 
 
 def _get(path: str, timeout: int = 10) -> dict:
     try:
-        r = requests.get(f"{SAFIYE_API}{path}", timeout=timeout)
+        r = requests.get(f"{SAFIYE_API}{path}", headers=_headers(), timeout=timeout)
         r.raise_for_status()
         return r.json()
     except requests.ConnectionError:
@@ -46,7 +65,7 @@ def _get(path: str, timeout: int = 10) -> dict:
 
 def _post(path: str, payload: dict, timeout: int = 30) -> dict:
     try:
-        r = requests.post(f"{SAFIYE_API}{path}", json=payload, timeout=timeout)
+        r = requests.post(f"{SAFIYE_API}{path}", json=payload, headers=_headers(), timeout=timeout)
         r.raise_for_status()
         return r.json()
     except requests.ConnectionError:
@@ -57,7 +76,7 @@ def _post(path: str, payload: dict, timeout: int = 30) -> dict:
 
 def _ping() -> None:
     try:
-        requests.post(f"{SAFIYE_API}/api/mcp_ping", timeout=3)
+        requests.post(f"{SAFIYE_API}/api/mcp_ping", headers=_headers(), timeout=3)
     except Exception:
         pass
 
@@ -146,6 +165,56 @@ async def handle_list_tools() -> list[types.Tool]:
                     "message": {
                         "type": "string",
                         "description": "Plain-text description of what you are currently doing. Include counts where possible."
+                    }
+                },
+            },
+        ),
+        types.Tool(
+            name="push_repeater_request",
+            description=(
+                "Push a single request template into the Safiye Repeater UI. "
+                "This creates a Repeater tab and History row only; it does not send the request. "
+                "Use either raw_request for a complete HTTP request, or method/url/headers/body fields."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short tab title, e.g. FINDING-010 SQL check."},
+                    "raw_request": {"type": "string", "description": "Complete raw HTTP request with request line, headers, blank line, and optional body."},
+                    "method": {"type": "string", "description": "HTTP method when raw_request is not supplied."},
+                    "url": {"type": "string", "description": "Absolute URL or path when raw_request is not supplied."},
+                    "headers": {"type": "object", "description": "HTTP headers when raw_request is not supplied."},
+                    "body": {"type": "string", "description": "Request body when raw_request is not supplied."},
+                    "dest": {"type": "string", "description": "Optional target label or host:port for the Repeater TCP target."},
+                    "socket": {"type": "string", "description": "Optional socket id. Use HTTP for raw HTTP/cURL-style requests."},
+                },
+            },
+        ),
+        types.Tool(
+            name="push_repeater_requests",
+            description=(
+                "Push multiple request templates into the Safiye Repeater UI. "
+                "This creates Repeater tabs and History rows only; it does not send/replay traffic."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["requests"],
+                "properties": {
+                    "requests": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "raw_request": {"type": "string"},
+                                "method": {"type": "string"},
+                                "url": {"type": "string"},
+                                "headers": {"type": "object"},
+                                "body": {"type": "string"},
+                                "dest": {"type": "string"},
+                                "socket": {"type": "string"},
+                            },
+                        },
                     }
                 },
             },
@@ -258,6 +327,40 @@ async def handle_call_tool(name: str, arguments: dict | None) -> list[types.Text
         if message:
             _log(message)
         return [types.TextContent(type="text", text="Progress logged.")]
+
+    # â”€â”€ push_repeater_request(s) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    elif name in ("push_repeater_request", "push_repeater_requests"):
+        if name == "push_repeater_request":
+            item = dict(args)
+            if "raw_request" in item and "request" not in item:
+                item["request"] = item.pop("raw_request")
+            requests_payload = [item]
+        else:
+            requests_payload = []
+            for item in args.get("requests", []):
+                if not isinstance(item, dict):
+                    continue
+                item = dict(item)
+                if "raw_request" in item and "request" not in item:
+                    item["request"] = item.pop("raw_request")
+                requests_payload.append(item)
+
+        if not requests_payload:
+            return [types.TextContent(type="text", text="No requests provided.")]
+
+        _log(f"Pushing {len(requests_payload)} request template(s) into Repeater...")
+        try:
+            result = _post("/api/repeater/push", {"requests": requests_payload})
+        except RuntimeError as e:
+            return [types.TextContent(type="text", text=str(e))]
+
+        if result.get("status") != "ok":
+            return [types.TextContent(type="text", text=f"Safiye rejected repeater push: {result.get('error', 'unknown error')}")]
+
+        return [types.TextContent(type="text", text=(
+            f"Pushed {result.get('count', len(requests_payload))} request(s) into Safiye Repeater. "
+            "Open the Repeater tab; requests are staged but not sent."
+        ))]
 
     raise ValueError(f"Unknown tool: {name}")
 

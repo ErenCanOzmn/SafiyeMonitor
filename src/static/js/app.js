@@ -1,3 +1,39 @@
+// ── Bind/auth hardening: per-session token plumbing (safiyemonitor-08) ───────
+// The server injects window.SAFIYE_TOKEN into <head> at serve time. We attach it
+// to every same-origin /api request as X-Safiye-Token (a custom header ⇒ a
+// cross-origin caller triggers a CORS preflight the server refuses ⇒ browser-based
+// SSRF and LAN callers are blocked) and to the WebSocket via query string.
+// Backward-compatible: if no token has been injected, no header is added.
+(function () {
+    // Token is injected by the server as <meta name="safiye-token"> (a meta tag,
+    // not an inline script, so the script-src 'self' CSP doesn't block it).
+    let _cached = null;
+    function tok() {
+        if (_cached !== null) return _cached;
+        try {
+            const m = document.querySelector('meta[name="safiye-token"]');
+            _cached = (m && m.getAttribute("content")) || window.SAFIYE_TOKEN || "";
+        } catch (e) { _cached = ""; }
+        return _cached;
+    }
+    window.__safiyeToken = tok;
+    const _origFetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+        try {
+            const t = tok();
+            if (t && typeof input === "string" &&
+                (input.startsWith("/api/") || input.startsWith("api/") ||
+                 input.startsWith(window.location.origin + "/api/"))) {
+                init = init ? Object.assign({}, init) : {};
+                const h = new Headers(init.headers || {});
+                if (!h.has("X-Safiye-Token")) h.set("X-Safiye-Token", t);
+                init.headers = h;
+            }
+        } catch (e) {}
+        return _origFetch(input, init);
+    };
+})();
+
 document.addEventListener("DOMContentLoaded", () => {
     // UI Elements
     const btnStart = document.getElementById("btnStart");
@@ -8,6 +44,12 @@ document.addEventListener("DOMContentLoaded", () => {
     const statusText = document.getElementById("statusText");
     const targetExeStr = document.getElementById("targetExe");
     const targetArgsStr = document.getElementById("targetArgs");
+    const targetPidStr = document.getElementById("targetPid");
+    const modeSpawn = document.getElementById("modeSpawn");
+    const modePid = document.getElementById("modePid");
+    const spawnFields = document.getElementById("spawnFields");
+    const pidField = document.getElementById("pidField");
+    const argsField = document.getElementById("argsField");
 
     // ── Multi-script management ───────────────────────────────────────────────
     function getScriptPaths() {
@@ -31,7 +73,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const bBtn = document.createElement("button");
         bBtn.className = "btn btn-neutral browse-script-btn";
         bBtn.style.cssText = "flex:0 0 auto; padding:8px 10px;";
-        bBtn.title = "Browse"; bBtn.textContent = "📂";
+        bBtn.title = "Browse for a script"; bBtn.textContent = "Browse";
         const rBtn = document.createElement("button");
         rBtn.className = "btn btn-neutral remove-script-btn";
         rBtn.style.cssText = "flex:0 0 auto; padding:8px 10px;";
@@ -161,6 +203,23 @@ document.addEventListener("DOMContentLoaded", () => {
     let selectedHistoryId = null;
     let historyDirFilter  = "ALL"; // "ALL" | "OUT" | "IN"
 
+    // ── Request/response correlation ──────────────────────────────────────────
+    // Pairs each inbound (IN) row with the request (OUT) it answers. Events are
+    // grouped by "connection": a real socket handle for plaintext ws2_32 traffic
+    // ("sk:<socket>"), or the TLS connection id the hook ships for encrypted
+    // traffic (SChannel context / OpenSSL SSL*). On a connection, the most recent
+    // OUT owns every IN that follows until the next OUT — so a multi-segment
+    // response (many recv/SSL_read events) all map back to the one request.
+    let historyBySeq   = {};   // _seq  -> history item (for jump/highlight lookup)
+    let activeReqByConn = {};   // connKey -> the request item currently being answered
+
+    function histConnKey(msg) {
+        if (msg.conn) return String(msg.conn);
+        const s = msg.socket;
+        if (s !== undefined && s !== null && s !== 0 && s !== "0") return "sk:" + s;
+        return null;   // socket 0 with no conn id → cannot correlate (leave unpaired)
+    }
+
     // Accumulates all captured events for AI analysis
     const sessionCapture = {
         tcpPackets:      [],
@@ -222,21 +281,6 @@ document.addEventListener("DOMContentLoaded", () => {
     function switchToTab(targetId) {
         const btn = document.querySelector(`.tab-btn[data-target="${targetId}"]`);
         if (btn) btn.click();
-    }
-
-    // Row density toggle (compact <-> comfortable), persisted across reloads.
-    const btnDensity = document.getElementById("btnDensity");
-    if (btnDensity) {
-        const applyDensity = (compact) => {
-            document.body.classList.toggle("density-compact", compact);
-            btnDensity.textContent = compact ? "Comfortable" : "Compact";
-        };
-        applyDensity(localStorage.getItem("sf-density") === "compact");
-        btnDensity.addEventListener("click", () => {
-            const compact = !document.body.classList.contains("density-compact");
-            localStorage.setItem("sf-density", compact ? "compact" : "comfortable");
-            applyDensity(compact);
-        });
     }
 
     // Modal Logic
@@ -568,7 +612,7 @@ document.addEventListener("DOMContentLoaded", () => {
     function sendToRepeater(msg) {
         switchToTab("tab-repeater");
         // Create new tab or use existing
-        createNewRepeaterTab(msg.dest, msg.body, msg.socket);
+        createNewRepeaterTab(msg.dest, msg.body, msg.socket, msg.title);
     }
 
     // Repeater Logic
@@ -576,8 +620,19 @@ document.addEventListener("DOMContentLoaded", () => {
     const btnNewRepeaterTab = document.getElementById("btnNewRepeaterTab");
     const repeaterSocketId = document.getElementById("repeaterSocketId");
     const repeaterDest = document.getElementById("repeaterDest");
+    const repeaterTcpTls = document.getElementById("repeaterTcpTls");
+
+    // Auto-enable TLS when the target is the standard HTTPS port, so replaying a
+    // captured HTTPS request "just works" without the operator ticking the box.
+    function autoSetRepeaterTls() {
+        if (!repeaterTcpTls) return;
+        const d = (repeaterDest && repeaterDest.value || "").trim();
+        repeaterTcpTls.checked = /:443$/.test(d);
+    }
+    if (repeaterDest) repeaterDest.addEventListener("input", autoSetRepeaterTls);
     const repeaterReqArea = document.getElementById("repeaterReqArea");
     const repeaterResArea = document.getElementById("repeaterResArea");
+    const repeaterCurrentTabTitle = document.getElementById("repeaterCurrentTabTitle");
     const btnRepeaterSend = document.getElementById("btnRepeaterSend");
     const btnRepeaterTcpSend = document.getElementById("btnRepeaterTcpSend");
     const repeaterFmtUtf8 = document.getElementById("repeaterFmtUtf8");
@@ -587,6 +642,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const repeaterResFmtHex = document.getElementById("repeaterResFmtHex");
     let repeaterTabs = [];
     let activeRepeaterTab = null;
+    let repeaterTabCounter = 0;
 
     function updateRepeaterReqModeUI(mode) {
         repeaterFmtUtf8.className = "btn " + (mode === "utf8" ? "btn-primary" : "btn-neutral");
@@ -608,15 +664,37 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    function createNewRepeaterTab(dest, body, socket) {
-        const id = Date.now();
-        const tab = { id, dest, body, socket, response: "", responseHex: "", responseUtf8: "", reqMode: "utf8", resMode: "utf8" };
+    function createNewRepeaterTab(dest, body, socket, title) {
+        const id = `${Date.now()}-${++repeaterTabCounter}`;
+        const tab = { id, dest, body, socket, title, response: "", responseHex: "", responseUtf8: "", reqMode: "utf8", resMode: "utf8" };
         repeaterTabs.push(tab);
 
         const btn = document.createElement("button");
         btn.className = "btn";
-        btn.style.padding = "4px 12px";
-        btn.textContent = dest || "New Tab";
+        const label = title || dest || "New Tab";
+        btn.textContent = label;
+        btn.title = label;
+        btn.style.width = "100%";
+        btn.style.display = "block";
+        btn.style.boxSizing = "border-box";
+        btn.style.flex = "0 0 auto";
+        btn.style.textAlign = "left";
+        btn.style.minHeight = "34px";
+        btn.style.lineHeight = "18px";
+        btn.style.padding = "7px 10px";
+        btn.style.margin = "0 0 7px 0";
+        btn.style.borderRadius = "7px";
+        btn.style.border = "1px solid rgba(122,162,247,0.32)";
+        btn.style.background = "#0f1320";
+        btn.style.color = "#c8d3f5";
+        btn.style.overflow = "hidden";
+        btn.style.whiteSpace = "nowrap";
+        btn.style.textOverflow = "ellipsis";
+        btn.style.fontFamily = "var(--font-mono)";
+        btn.style.fontSize = "0.74rem";
+        btn.style.fontWeight = "700";
+        btn.style.letterSpacing = "0.3px";
+        btn.style.textTransform = "none";
         btn.onclick = () => selectRepeaterTab(id);
         tab.btn = btn;
 
@@ -626,13 +704,25 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function selectRepeaterTab(id) {
         activeRepeaterTab = repeaterTabs.find(t => t.id === id);
-        repeaterTabs.forEach(t => t.btn.classList.remove("active-repeater-tab"));
+        repeaterTabs.forEach(t => {
+            t.btn.classList.remove("active-repeater-tab");
+            t.btn.style.background = "#0f1320";
+            t.btn.style.color = "#c8d3f5";
+            t.btn.style.borderColor = "rgba(122,162,247,0.32)";
+        });
         activeRepeaterTab.btn.classList.add("active-repeater-tab");
+        activeRepeaterTab.btn.style.background = "rgba(122,162,247,0.18)";
+        activeRepeaterTab.btn.style.color = "#ffffff";
+        activeRepeaterTab.btn.style.borderColor = "#7aa2f7";
 
         repeaterSocketId.value = activeRepeaterTab.socket || "";
+        if (repeaterCurrentTabTitle) {
+            repeaterCurrentTabTitle.textContent = activeRepeaterTab.title || activeRepeaterTab.dest || "Repeater Request";
+        }
         // Prefill the TCP target from the captured destination (skip placeholders).
         const d = activeRepeaterTab.dest || "";
         if (repeaterDest) repeaterDest.value = /:\d+$/.test(d) ? d : "";
+        autoSetRepeaterTls();
         repeaterReqArea.value  = activeRepeaterTab.body || "";
         updateRepeaterReqModeUI(activeRepeaterTab.reqMode || "utf8");
         updateRepeaterResModeUI(activeRepeaterTab.resMode || "utf8");
@@ -726,12 +816,14 @@ document.addEventListener("DOMContentLoaded", () => {
             activeRepeaterTab.body = repeaterReqArea.value;
             activeRepeaterTab.dest = dest;
             const isHex = activeRepeaterTab.reqMode === "hex";
-            repeaterResArea.value = "Opening new TCP connection to " + dest + " ...";
+            const useTls = !!(repeaterTcpTls && repeaterTcpTls.checked);
+            repeaterResArea.value = `Opening new ${useTls ? "TLS" : "TCP"} connection to ${dest} ...`;
             ws.send(JSON.stringify({
                 action: "repeater_tcp_send",
                 dest: dest,
                 data: activeRepeaterTab.body,
                 is_hex: isHex,
+                tls: useTls,
                 tab_id: activeRepeaterTab.id
             }));
         };
@@ -784,10 +876,14 @@ document.addEventListener("DOMContentLoaded", () => {
                 return;
             }
             activeRepeaterTab.body = raw;
+            const socketHint = (repeaterSocketId && repeaterSocketId.value || "").trim().toLowerCase();
+            const destHint = (repeaterDest && repeaterDest.value || "").trim().toLowerCase();
+            const scheme = socketHint === "https" || destHint.endsWith(":443") ? "https" : "http";
             repeaterResArea.value = "Executing cURL request...";
             ws.send(JSON.stringify({
                 action: "repeater_curl_send",
-                data: raw
+                data: raw,
+                scheme: scheme
             }));
         };
     }
@@ -961,6 +1057,7 @@ document.addEventListener("DOMContentLoaded", () => {
             ? `#${item._seq}  ${ep.method} ${ep.path}  →  ${item.dest || ""}`
             : `#${item._seq}  ${item.direction || ""}  →  ${item.dest || ""}`;
         title.textContent = label;
+        renderDetailCorr(item);
 
         const elU8  = document.getElementById("histDetUtf8");
         const elHex = document.getElementById("histDetHex");
@@ -984,19 +1081,91 @@ document.addEventListener("DOMContentLoaded", () => {
         panel.style.display = "flex";
     }
 
+    // Small clickable badge that shows, and jumps to, a row's correlated pair.
+    function corrBadge(item) {
+        const dir = dirShort(item.direction);
+        if (dir === "IN" && item._reqSeq != null) {
+            return ` <span class="hist-link" data-jump="${item._reqSeq}" title="Response to request #${item._reqSeq} — click to jump">↳ req #${item._reqSeq}</span>`;
+        }
+        if (dir === "OUT") {
+            const n = (item._respSeqs && item._respSeqs.length) || 0;
+            return ` <span class="hist-link hist-respbadge" id="respbadge-${item._seq}" data-jump="${n ? item._respSeqs[0] : ""}" title="Jump to first response"${n ? "" : ' style="display:none;"'}>${n ? "↴ " + n + " resp" : ""}</span>`;
+        }
+        return "";
+    }
+
+    // A response linked to a request after that request's row was already built,
+    // so refresh the request row's badge in place.
+    function updateRespBadge(req) {
+        // Update via the cached row node, not getElementById, so it works even
+        // when the request row is currently filtered out of the document.
+        const el = req._tr ? req._tr.querySelector(".hist-respbadge") : null;
+        if (!el) return;
+        const n = req._respSeqs.length;
+        el.textContent = "↴ " + n + " resp";
+        el.style.display = "";
+        el.setAttribute("data-jump", req._respSeqs[0]);
+    }
+
+    // Highlight the selected row's counterpart(s): a request highlights its
+    // responses, a response highlights its request.
+    function highlightPairs(item) {
+        const seqs = [];
+        if (item._reqSeq != null) seqs.push(item._reqSeq);
+        if (item._respSeqs) for (const s of item._respSeqs) seqs.push(s);
+        for (const s of seqs) {
+            const it = historyBySeq[s];
+            if (it && it._tr) it._tr.classList.add("hist-paired");
+        }
+    }
+
+    function jumpToHistorySeq(seq) {
+        const item = historyBySeq[seq];
+        if (!item || !item._tr) return;
+        if (!item._tr.parentNode) return;   // currently filtered out of the table
+        item._tr.scrollIntoView({ block: "center", behavior: "smooth" });
+        if (typeof item._tr.onclick === "function") item._tr.onclick();
+    }
+
+    // Render the detail panel's correlation link ("show response / show request")
+    // for the given item. Kept separate from showHistoryDetail so a response that
+    // arrives while its request is open can update the link without resetting the
+    // body view.
+    function renderDetailCorr(item) {
+        const corrEl = document.getElementById("histDetailCorr");
+        if (!corrEl) return;
+        let html = "";
+        if (item._reqSeq != null) {
+            html = `<span class="hist-detail-link" data-detail="${item._reqSeq}" title="Show the request this responds to">↳ show request #${item._reqSeq}</span>`;
+        } else if (item._respSeqs && item._respSeqs.length) {
+            html = item._respSeqs.map(s =>
+                `<span class="hist-detail-link" data-detail="${s}" title="Show this request's response (IN)">↴ show response #${s}</span>`
+            ).join(" ");
+        } else if (dirShort(item.direction) === "IN") {
+            html = `<span class="hist-detail-note">↳ no matching request</span>`;
+        } else if (dirShort(item.direction) === "OUT") {
+            html = `<span class="hist-detail-note">↴ no response yet</span>`;
+        }
+        corrEl.innerHTML = html;
+    }
+
     function buildHistoryRow(item) {
         const tr = document.createElement("tr");
         tr._msg = item;
         tr.innerHTML = `
             <td>${item._seq}</td>
             <td style="color:var(--text-tertiary); font-size:0.72rem;">${item._time}</td>
-            <td>${endpointLabel(item)}</td>
+            <td>${endpointLabel(item)}${corrBadge(item)}</td>
             <td style="text-align:right;">${item.size || 0}</td>
             <td style="color:var(--text-tertiary);">${escHtml(item.dest || "Unknown")}</td>`;
         tr.onclick = () => {
-            document.querySelectorAll("#tblHistory tbody tr").forEach(r => r.classList.remove("hist-selected"));
+            document.querySelectorAll("#tblHistory tbody tr").forEach(r => {
+                r.classList.remove("hist-selected");
+                r.classList.remove("hist-paired");
+            });
             tr.classList.add("hist-selected");
             selectedHistoryId = item._seq;
+            highlightPairs(item);
             showHistoryDetail(item);
         };
         item._tr = tr;
@@ -1008,18 +1177,56 @@ document.addEventListener("DOMContentLoaded", () => {
         msg._seq  = counters.history;
         msg._time = msg._ts || getTimeString();
         historyData.push(msg);
+        historyBySeq[msg._seq] = msg;
+
+        // Correlate request↔response before building the row so IN rows can show
+        // the request they answer, and OUT rows learn about their responses.
+        const _dir = dirShort(msg.direction);
+        const _ck  = histConnKey(msg);
+        msg._respSeqs = [];
+        let _linkedReq = null;
+        if (_ck) {
+            if (_dir === "CONNECT") {
+                delete activeReqByConn[_ck];        // fresh/closed connection → reset
+            } else if (_dir === "OUT") {
+                activeReqByConn[_ck] = msg;          // owns the IN rows that follow
+            } else if (_dir === "IN") {
+                const req = activeReqByConn[_ck];
+                if (req) {
+                    msg._reqSeq = req._seq;
+                    req._respSeqs.push(msg._seq);
+                    _linkedReq = req;
+                }
+            }
+        }
+
         buildHistoryRow(msg);
+        if (_linkedReq) {
+            updateRespBadge(_linkedReq);
+            // If the request is currently open in the detail panel, reveal its new
+            // "show response" link live (without disturbing the body view).
+            if (selectedHistoryId === _linkedReq._seq) renderDetailCorr(_linkedReq);
+        }
 
         // Cap history so a long session can't grow the array and DOM without bound.
         const HISTORY_CAP = 2000;
         while (historyData.length > HISTORY_CAP) {
             const old = historyData.shift();
-            if (old && old._tr && old._tr.parentNode) old._tr.parentNode.removeChild(old._tr);
+            if (old) {
+                delete historyBySeq[old._seq];
+                if (old._tr && old._tr.parentNode) old._tr.parentNode.removeChild(old._tr);
+            }
         }
 
         if (!historySearch && historySortCol === "id" && historyDirFilter === "ALL") {
             const tbody = document.querySelector("#tblHistory tbody");
-            if (tbody) tbody.appendChild(msg._tr);
+            if (tbody) {
+                // Respect the sort direction instead of always appending:
+                //   descending (default / newest-first) → insert at the top
+                //   ascending  (oldest-first)           → append at the bottom
+                if (historySortAsc) tbody.appendChild(msg._tr);
+                else tbody.insertBefore(msg._tr, tbody.firstChild);
+            }
             const countEl = document.getElementById("historyCount");
             if (countEl) countEl.textContent = `${historyData.length} requests`;
         } else {
@@ -1032,6 +1239,8 @@ document.addEventListener("DOMContentLoaded", () => {
     function clearAllState() {
         // History table
         historyData = [];
+        historyBySeq = {};
+        activeReqByConn = {};
         counters.history = 0;
         const hTbody = document.querySelector("#tblHistory tbody");
         if (hTbody) while (hTbody.firstChild) hTbody.removeChild(hTbody.firstChild);
@@ -1083,8 +1292,18 @@ document.addEventListener("DOMContentLoaded", () => {
         if (m.type === "status") {
             statusText.textContent = m.message;
             const active = m.message === "Hook Active!";
+            window.SafiyeUI?.setSession({ active, connected: true, targetPid: m.target_pid, targetName: m.target_name, startedAt: m.started_at });
             btnStart.disabled = active; btnStop.disabled = !active;
-            if (active && targetExeStr.value) {
+            if (btnAttach) btnAttach.disabled = active;
+            // Mirror status changes into the System Output Log too.
+            const cOut = document.getElementById("consoleOut");
+            if (cOut && m.message) {
+                cOut.textContent += `[status] ${m.message}\n`;
+                cOut.scrollTop = cOut.scrollHeight;
+            }
+            // Static-string extraction needs a real on-disk path. When we attached
+            // by PID/name the field holds a number/name, not a file — skip it.
+            if (active && targetExeStr.value && !/^\d+$/.test(targetExeStr.value.trim())) {
                 ws.send(JSON.stringify({ action: "get_static_strings", path: targetExeStr.value }));
             }
         }
@@ -1103,6 +1322,13 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         else if (m.type === "static_strings_error") {
             if (staticStatus) staticStatus.textContent = m.message || "Static strings failed.";
+        }
+        else if (m.type === "repeater_seed" || m.type === "manual_repeater_seed") {
+            const body = m.body || (m.body_hex ? hexToUtf8(m.body_hex) : "");
+            switchToTab("tab-repeater");
+            createNewRepeaterTab(m.dest || "MCP", body, m.socket || "HTTP", m.title || "MCP Request");
+            renderHistoryMsg(m);
+            showToast("Request pushed to Repeater: " + (m.title || m.dest || "MCP Request"), "success");
         }
         else if (m.type === "repeater_response") {
             // Immediate send confirmation (not the actual TCP response)
@@ -1257,7 +1483,14 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         else if (m.type === "console_output") {
             const c = document.getElementById("consoleOut");
-            if (c) { c.textContent += m.text; c.scrollTop = c.scrollHeight; }
+            if (c) {
+                c.textContent += m.text;
+                // Cap the buffer so a long session can't grow it without bound.
+                if (c.textContent.length > 200000) {
+                    c.textContent = c.textContent.slice(-160000);
+                }
+                c.scrollTop = c.scrollHeight;
+            }
         }
         else if (m.type === "vuln_findings") {
             const findings = m.findings || [];
@@ -1293,17 +1526,28 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // WebSocket
     function connectWebSocket() {
-        ws = new WebSocket(`ws://${window.location.host}/ws`);
-        ws.onopen = () => { statusText.textContent = "Connected (Ready)"; syncStatus(); };
+        const _t = (window.__safiyeToken && window.__safiyeToken()) || "";
+        const _q = _t ? ("?token=" + encodeURIComponent(_t)) : "";
+        ws = new WebSocket(`ws://${window.location.host}/ws${_q}`);
+        ws.onopen = () => { statusText.textContent = "Connected (Ready)"; window.SafiyeUI?.setSession({ connected: true }); syncStatus(); };
         ws.onmessage = (e) => processMessage(JSON.parse(e.data));
-        ws.onclose = () => setTimeout(connectWebSocket, 2000);
+        ws.onclose = () => {
+            statusText.textContent = "Disconnected";
+            window.SafiyeUI?.setSession({ connected: false });
+            setTimeout(connectWebSocket, 2000);
+        };
     }
 
     async function syncStatus() {
         try {
             const r = await fetch("/api/status");
             const d = await r.json();
-            if (d.is_hooking) { statusText.textContent = "Hook Active!"; btnStart.disabled = true; btnStop.disabled = false; }
+            if (typeof d.is_hooking === "boolean") {
+                statusText.textContent = d.is_hooking ? "Hook Active!" : "Connected (Ready)";
+                btnStart.disabled = d.is_hooking; btnStop.disabled = !d.is_hooking;
+                if (btnAttach) btnAttach.disabled = d.is_hooking;
+                window.SafiyeUI?.setSession({ active: d.is_hooking, targetPid: d.target_pid, targetName: d.target_name, startedAt: d.started_at });
+            }
         } catch {}
     }
 
@@ -1315,9 +1559,36 @@ document.addEventListener("DOMContentLoaded", () => {
             .then(() => showToast("Spawning target and attaching hooks...", "info"))
             .catch(() => showToast("Failed to start hook.", "error"));
     };
+    if (btnAttach) btnAttach.onclick = () => {
+        const target = (targetPidStr ? targetPidStr.value : "").trim();
+        if (!target) { showToast("Enter a PID to attach to.", "error"); return; }
+        if (!/^\d+$/.test(target)) { showToast("PID must be a number.", "error"); return; }
+        const scripts = getScriptPaths();
+        if (!scripts.length) { showToast("Add at least one Frida script.", "error"); return; }
+        fetch("/api/attach_hook", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({target: target, target_script: scripts[0], target_scripts: scripts})})
+            .then(r => r.json())
+            .then(d => {
+                if (d && d.status === "ok") showToast(`Attaching to PID ${target}...`, "info");
+                else showToast(`Attach failed: ${(d && d.message) || "unknown error"}`, "error");
+            })
+            .catch(() => showToast("Failed to attach hook.", "error"));
+    };
+
+    // Spawn vs PID-Attach mode: show only the fields + action button each needs.
+    function applyHookMode() {
+        const pid = !!(modePid && modePid.checked);
+        if (spawnFields) spawnFields.style.display = pid ? "none" : "";
+        if (argsField)   argsField.style.display   = pid ? "none" : "";
+        if (pidField)    pidField.style.display    = pid ? "" : "none";
+        if (btnStart)    btnStart.style.display     = pid ? "none" : "";
+        if (btnAttach)   btnAttach.style.display    = pid ? "" : "none";
+    }
+    if (modeSpawn) modeSpawn.addEventListener("change", applyHookMode);
+    if (modePid)   modePid.addEventListener("change", applyHookMode);
+    applyHookMode();
     btnStop.onclick = () => {
         fetch("/api/stop_hook", { method: "POST" })
-            .then(() => showToast("Hook stopped.", "info"))
+            .then(() => { showToast("Hook stopped.", "info"); if (btnAttach) btnAttach.disabled = false; })
             .catch(() => showToast("Failed to stop hook.", "error"));
     };
     btnBrowseExe.onclick = async () => { const r = await fetch("/api/browse_file"); const d = await r.json(); if (d.path) targetExeStr.value = d.path; };
@@ -1410,53 +1681,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function applyVulnFilter() {
-        const list = document.getElementById("vulnFindingsList");
-        if (!list) return;
-        const emptyState = document.getElementById("vulnEmptyState");
-
         const filtered = activeVulnFilter === "ALL"
             ? allVulnFindings
             : allVulnFindings.filter(f => f.severity === activeVulnFilter);
-
-        // Clear dynamic cards (keep emptyState element)
-        Array.from(list.children).forEach(el => { if (el.id !== "vulnEmptyState") el.remove(); });
-
-        if (filtered.length === 0) {
-            if (emptyState) emptyState.style.display = "flex";
-            return;
-        }
-        if (emptyState) emptyState.style.display = "none";
-
-        filtered.forEach(finding => {
-            const cfg = SEVERITY_CFG[finding.severity] || SEVERITY_CFG.INFO;
-            const steps = (finding.verification_steps || [])
-                .map((s,i) => `<li style="margin-bottom:4px;">${escHtml(s)}</li>`).join("");
-            const card = document.createElement("div");
-            card.style.cssText = `background:${cfg.bg}; border:1px solid ${cfg.border}; border-radius:8px; padding:16px; animation: borderPulse 3s ease-in-out ${finding.severity==="CRITICAL"?"infinite":"1"};`;
-            card.innerHTML = `
-                <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
-                    <span style="background:${cfg.color}; color:#0d1017; padding:2px 9px; border-radius:10px; font-size:0.68rem; font-weight:800; letter-spacing:0.8px;">${escHtml(finding.severity)}</span>
-                    <span style="font-weight:600; font-size:0.92rem; color:var(--text-primary);">${escHtml(finding.title)}</span>
-                </div>
-                <div style="color:var(--text-secondary); font-size:0.83rem; margin-bottom:10px; line-height:1.6;">${escHtml(finding.description)}</div>
-                ${finding.evidence ? `
-                <details style="margin-bottom:8px;">
-                    <summary style="cursor:pointer; color:${cfg.color}; font-size:0.78rem; font-weight:600; user-select:none;">▶ Evidence</summary>
-                    <pre style="margin-top:6px; background:rgba(0,0,0,0.45); padding:10px 12px; border-radius:4px; font-size:0.76rem; font-family:var(--font-mono); color:var(--text-primary); white-space:pre-wrap; word-break:break-all; border:1px solid ${cfg.border};">${escHtml(finding.evidence)}</pre>
-                </details>` : ""}
-                ${steps ? `
-                <details style="margin-bottom:8px;" open>
-                    <summary style="cursor:pointer; color:${cfg.color}; font-size:0.78rem; font-weight:600; user-select:none;">▶ Verification Steps</summary>
-                    <ol style="margin-top:6px; padding-left:18px; font-size:0.8rem; color:var(--text-secondary); line-height:1.7;">${steps}</ol>
-                </details>` : ""}
-                ${finding.exploitation_notes && finding.exploitation_notes !== "N/A" ? `
-                <details>
-                    <summary style="cursor:pointer; color:${cfg.color}; font-size:0.78rem; font-weight:600; user-select:none;">▶ Exploitation Notes</summary>
-                    <div style="margin-top:6px; font-size:0.8rem; color:var(--text-secondary); line-height:1.6;">${escHtml(finding.exploitation_notes)}</div>
-                </details>` : ""}
-            `;
-            list.appendChild(card);
-        });
+        window.SafiyeUI.renderFindings(filtered, allVulnFindings.length);
     }
 
     function renderVulnFindings(findings) {
@@ -1498,6 +1726,20 @@ document.addEventListener("DOMContentLoaded", () => {
     const histSortToggle  = document.getElementById("historySortToggle");
     const histDetailPanel = document.getElementById("historyDetailPanel");
     const histDetailClose = document.getElementById("histDetailClose");
+
+    // Clicking a correlation badge jumps to the paired row. Capture phase + stop
+    // so the badge click doesn't also trigger the row's own select handler.
+    const histTbodyEl = document.querySelector("#tblHistory tbody");
+    if (histTbodyEl) {
+        histTbodyEl.addEventListener("click", (e) => {
+            const link = e.target.closest(".hist-link");
+            if (!link) return;
+            e.stopPropagation();
+            e.preventDefault();
+            const seq = parseInt(link.getAttribute("data-jump"), 10);
+            if (!isNaN(seq)) jumpToHistorySeq(seq);
+        }, true);
+    }
 
     if (histSearchEl) {
         histSearchEl.addEventListener("input", debounce(() => {
@@ -1573,6 +1815,23 @@ document.addEventListener("DOMContentLoaded", () => {
             if (histDetailPanel) histDetailPanel.style.display = "none";
             document.querySelectorAll("#tblHistory tbody tr").forEach(r => r.classList.remove("hist-selected"));
             selectedHistoryId = null;
+        });
+    }
+
+    // Detail-panel correlation links: clicking "show response / show request"
+    // loads the paired row's body into the same panel (and syncs the table
+    // selection when that row is currently visible).
+    const histDetailCorrEl = document.getElementById("histDetailCorr");
+    if (histDetailCorrEl) {
+        histDetailCorrEl.addEventListener("click", (e) => {
+            const link = e.target.closest(".hist-detail-link");
+            if (!link) return;
+            const seq = parseInt(link.getAttribute("data-detail"), 10);
+            if (isNaN(seq)) return;
+            const item = historyBySeq[seq];
+            if (!item) return;
+            if (item._tr && item._tr.parentNode) jumpToHistorySeq(seq);  // sync row + panel
+            else showHistoryDetail(item);                                 // row filtered out
         });
     }
 
@@ -1658,7 +1917,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 file_events:     sessionCapture.fileEvents.slice(-100),
                 memory_strings:  sessionCapture.memoryStrings.slice(0,200).map(s => ({ type:s.type, val:s.val })),
                 static_strings:  sessionCapture.staticStrings.slice(0,200).map(s => ({ val:s.val })),
-                crypto_events:   sessionCapture.cryptoEvents.slice(-100).map(c => ({ api:c.api, op:c.op, size:c.size, body:(c.body||"").substring(0,512), dpapi_local_machine:c.dpapi_local_machine, dpapi_entropy:c.dpapi_entropy }))
+                crypto_events:   sessionCapture.cryptoEvents.slice(-100).map(c => ({ api:c.api, op:c.op, size:c.size, body:(c.body||"").substring(0,512), dpapi_local_machine:c.dpapi_local_machine, dpapi_entropy:c.dpapi_entropy })),
+                process_events:  processEvents.slice(-100).map(p => ({ api:p.api, exe:p.exe, args:p.args, verb:p.verb, elevated:p.elevated, caller_mod:p.caller_mod }))
             };
             fetch("/api/analyze_vulnerabilities", {
                 method: "POST",
@@ -1690,7 +1950,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     file_events:     sessionCapture.fileEvents.slice(-100),
                     memory_strings:  sessionCapture.memoryStrings.slice(0,200).map(s => ({ type:s.type, val:s.val })),
                     static_strings:  sessionCapture.staticStrings.slice(0,200).map(s => ({ val:s.val })),
-                    crypto_events:   sessionCapture.cryptoEvents.slice(-100).map(c => ({ api:c.api, op:c.op, size:c.size, body:(c.body||"").substring(0,512), dpapi_local_machine:c.dpapi_local_machine, dpapi_entropy:c.dpapi_entropy }))
+                    crypto_events:   sessionCapture.cryptoEvents.slice(-100).map(c => ({ api:c.api, op:c.op, size:c.size, body:(c.body||"").substring(0,512), dpapi_local_machine:c.dpapi_local_machine, dpapi_entropy:c.dpapi_entropy })),
+                    process_events:  processEvents.slice(-100).map(p => ({ api:p.api, exe:p.exe, args:p.args, verb:p.verb, elevated:p.elevated, caller_mod:p.caller_mod }))
                 };
                 const resp = await fetch("/api/rule_scan", {
                     method: "POST",
@@ -1830,6 +2091,7 @@ document.addEventListener("DOMContentLoaded", () => {
     function _pipeMatchesFilter(p) {
         if (pipeFilter === "ACCESSIBLE"  && !p.accessible)  return false;
         if (pipeFilter === "INTERESTING" && !p.interesting) return false;
+        if (pipeFilter === "WEAKDACL" && !["CRITICAL", "HIGH", "MEDIUM"].includes(p.risk)) return false;
         if (pipeSearchText) {
             const q = pipeSearchText.toLowerCase();
             if (!(p.name   || "").toLowerCase().includes(q) &&
@@ -1839,9 +2101,27 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function _pipeRowBg(p) {
+        if (p.risk === "CRITICAL") return "rgba(255,68,68,0.16)";
+        if (p.risk === "HIGH")     return "rgba(255,140,0,0.13)";
         if (p.interesting && p.accessible)  return "rgba(255,107,107,0.13)";
         if (p.interesting && !p.accessible) return "rgba(224,175,104,0.10)";
         return "";
+    }
+
+    const _DACL_STYLE = {
+        CRITICAL: {bg:"#ff4444",                 color:"#ffffff"},
+        HIGH:     {bg:"rgba(255,140,0,0.92)",    color:"#ffffff"},
+        MEDIUM:   {bg:"rgba(224,175,104,0.90)",  color:"#1a1a1a"},
+        LOW:      {bg:"rgba(158,206,106,0.22)",  color:"#9ece6a"},
+        INFO:     {bg:"rgba(122,162,247,0.20)",  color:"#7aa2f7"},
+        UNKNOWN:  {bg:"rgba(130,130,130,0.16)",  color:"#8a94b0"},
+    };
+
+    function _pipeDaclBadge(p) {
+        if (!p.risk) return `<span style="color:var(--text-tertiary); font-size:0.75rem;">—</span>`;
+        const s = _DACL_STYLE[p.risk] || _DACL_STYLE.UNKNOWN;
+        const tip = escHtml(p.risk_reason || "");
+        return `<span title="${tip}" style="display:inline-block; padding:1px 7px; border-radius:3px; font-size:0.67rem; font-weight:700; letter-spacing:0.3px; background:${s.bg}; color:${s.color};">${escHtml(p.risk)}</span>`;
     }
 
     function _pipeAccessBadge(p) {
@@ -1859,7 +2139,7 @@ document.addEventListener("DOMContentLoaded", () => {
         tbody.innerHTML = "";
         const visible = pipeData.filter(_pipeMatchesFilter);
         if (visible.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:var(--text-tertiary); padding:32px;">No pipes match the current filter.</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--text-tertiary); padding:32px;">No pipes match the current filter.</td></tr>`;
         } else {
             visible.forEach((p, i) => {
                 const tr = document.createElement("tr");
@@ -1869,6 +2149,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     <td style="color:var(--text-tertiary); font-size:0.75rem;">${i+1}</td>
                     <td style="font-family:'Fira Code',monospace; font-size:0.78rem;">\\\\.\\pipe\\${escHtml(p.name)}</td>
                     <td style="text-align:center;">${_pipeAccessBadge(p)}</td>
+                    <td style="text-align:center;">${_pipeDaclBadge(p)}</td>
                     <td style="font-size:0.75rem;">${_catBadge(p.category)}${escHtml(p.reason || "")}</td>`;
                 tr.onclick = () => openPipeClientPanel(p.name);
                 tbody.appendChild(tr);
@@ -1909,6 +2190,12 @@ document.addEventListener("DOMContentLoaded", () => {
                     reason:      p.reason      || "",
                     category:    p.category    || "",
                     hint:        p.hint        || "",
+                    risk:        p.risk        || null,
+                    risk_reason: p.risk_reason || "",
+                    null_dacl:   p.null_dacl   || false,
+                    sddl:        p.sddl        || "",
+                    owner:       p.owner       || "",
+                    risky_aces:  p.risky_aces  || [],
                 }));
             } else {
                 const r = await fetch("/api/pipes");
@@ -1916,6 +2203,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 pipeData = (d.pipes || []).map(p => ({
                     name: p.name, accessible: null,
                     interesting: false, reason: "", category: "", hint: "",
+                    risk: null, risk_reason: "", null_dacl: false, sddl: "", owner: "", risky_aces: [],
                 }));
             }
             rebuildPipeTable();
@@ -1942,6 +2230,505 @@ document.addEventListener("DOMContentLoaded", () => {
             rebuildPipeTable();
         };
     });
+
+    // ── PE protection analysis (DLL & Modules tab) ────────────────────────────
+    const _PE_RISK_STYLE = {
+        HIGH:    {bg:"rgba(255,140,0,0.92)",   color:"#fff"},
+        MEDIUM:  {bg:"rgba(224,175,104,0.90)", color:"#1a1a1a"},
+        LOW:     {bg:"rgba(158,206,106,0.22)", color:"#9ece6a"},
+        INFO:    {bg:"rgba(122,162,247,0.20)", color:"#7aa2f7"},
+        UNKNOWN: {bg:"rgba(130,130,130,0.16)", color:"#8a94b0"},
+    };
+    function _peYesNo(v) {
+        return v
+            ? `<span style="color:#9ece6a; font-weight:700;">✓</span>`
+            : `<span style="color:#ff6b6b; font-weight:700;">✗</span>`;
+    }
+    // SEH is a tri-state string ("n/a" on x64, "no-SEH"/"SafeSEH" safe on x86,
+    // "unknown" when it can't be determined) — not a simple yes/no.
+    function _peSeh(v) {
+        const safe = v === "no-SEH" || v === "SafeSEH";
+        const col = safe ? "#9ece6a" : "var(--text-tertiary)";
+        return `<span style="color:${col}; font-size:0.72rem;">${escHtml(v || "—")}</span>`;
+    }
+    function _peSigBadge(sig) {
+        const good = sig === "signed";
+        const bad  = sig === "UNSIGNED" || sig === "INVALID";
+        const col  = good ? "#9ece6a" : (bad ? "#ff6b6b" : "var(--text-tertiary)");
+        return `<span style="color:${col}; font-weight:${bad ? 700 : 400}; font-size:0.74rem;">${escHtml(sig || "?")}</span>`;
+    }
+    function _peRiskBadge(risk) {
+        const s = _PE_RISK_STYLE[risk] || _PE_RISK_STYLE.UNKNOWN;
+        return `<span style="display:inline-block; padding:1px 7px; border-radius:3px; font-size:0.67rem; font-weight:700; background:${s.bg}; color:${s.color};">${escHtml(risk || "?")}</span>`;
+    }
+    function renderPeScan(results) {
+        const tbody = document.getElementById("tblPeScanBody");
+        if (!tbody) return;
+        if (!results.length) {
+            tbody.innerHTML = `<tr><td colspan="9" style="text-align:center; color:var(--text-tertiary); padding:24px;">No PE files found for that path.</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = "";
+        results.forEach(r => {
+            const tr = document.createElement("tr");
+            if (r.risk === "HIGH")   tr.style.background = "rgba(255,140,0,0.10)";
+            else if (r.risk === "MEDIUM") tr.style.background = "rgba(224,175,104,0.07)";
+            if (!r.ok) {
+                tr.innerHTML = `<td title="${escHtml(r.path||"")}" style="font-family:'Fira Code',monospace; font-size:0.76rem;">${escHtml(r.name||"?")}</td>`
+                    + `<td colspan="7" style="color:var(--text-tertiary); font-size:0.75rem;">${escHtml(r.risk_reason||"not a PE / unreadable")}</td>`
+                    + `<td>${_peRiskBadge(r.risk)}</td>`;
+                tbody.appendChild(tr); return;
+            }
+            const notes = (r.dotnet ? `<span style="color:#bb9af7;">.NET</span> ` : "") + escHtml(r.risk_reason || "");
+            tr.innerHTML = `
+                <td title="${escHtml(r.path||"")}" style="font-family:'Fira Code',monospace; font-size:0.76rem;">${escHtml(r.name||"?")}</td>
+                <td style="font-size:0.74rem; color:var(--text-secondary);">${escHtml(r.arch||"")}</td>
+                <td style="text-align:center;">${_peYesNo(r.aslr)}</td>
+                <td style="text-align:center;">${_peYesNo(r.dep)}</td>
+                <td style="text-align:center;">${_peYesNo(r.cfg)}</td>
+                <td style="text-align:center;">${_peSeh(r.seh)}</td>
+                <td>${_peSigBadge(r.signature)}</td>
+                <td>${_peRiskBadge(r.risk)}</td>
+                <td style="font-size:0.74rem; color:var(--text-secondary);">${notes}</td>`;
+            tbody.appendChild(tr);
+        });
+    }
+    const btnPeScan = document.getElementById("btnPeScan");
+    if (btnPeScan) {
+        btnPeScan.onclick = async () => {
+            const pathEl = document.getElementById("peScanPath");
+            const recEl  = document.getElementById("peScanRecursive");
+            const statusEl = document.getElementById("peScanStatus");
+            let path = (pathEl && pathEl.value || "").trim();
+            if (!path && targetExeStr) { path = (targetExeStr.value || "").trim(); if (pathEl) pathEl.value = path; }
+            if (!path) { if (statusEl) statusEl.textContent = "Enter an exe path or folder."; return; }
+            btnPeScan.disabled = true;
+            if (statusEl) statusEl.textContent = "Scanning…";
+            try {
+                const r = await fetch("/api/pe_scan", {
+                    method: "POST", headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({ path, recursive: !!(recEl && recEl.checked) })
+                });
+                const d = await r.json();
+                renderPeScan(d.results || []);
+                if (statusEl) {
+                    const risky = (d.results || []).filter(x => x.risk === "HIGH" || x.risk === "MEDIUM").length;
+                    statusEl.textContent = `${d.count} module(s), ${risky} flagged.`;
+                }
+            } catch (e) {
+                if (statusEl) statusEl.textContent = "Error!";
+                console.error("PE scan error:", e);
+            } finally {
+                btnPeScan.disabled = false;
+            }
+        };
+    }
+
+    // ── COM/RPC scan (COM/RPC tab) ────────────────────────────────────────────
+    function renderComRpc(d) {
+        const db = document.getElementById("tblComDcomBody");
+        const findings = (d.dcom && d.dcom.findings) || [];
+        if (db) {
+            if (!findings.length) {
+                db.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--text-tertiary); padding:24px;">No weak DCOM permissions found (${(d.dcom && d.dcom.scanned) || 0} AppIDs scanned).</td></tr>`;
+            } else {
+                db.innerHTML = "";
+                findings.forEach(f => {
+                    const who = (f.principals || []).map(p =>
+                        `${escHtml(p.name)} <span style="color:var(--text-tertiary);">(${escHtml((p.rights || []).join(","))})</span>`).join("; ")
+                        + (f.null_dacl ? ` <span style="color:#ff6b6b; font-weight:700;">NULL DACL</span>` : "");
+                    const tr = document.createElement("tr");
+                    if (f.severity === "HIGH") tr.style.background = "rgba(255,140,0,0.08)";
+                    tr.innerHTML = `
+                        <td>${_peRiskBadge(f.severity)}</td>
+                        <td style="font-size:0.78rem;">${escHtml(f.name || "")}</td>
+                        <td style="font-family:'Fira Code',monospace; font-size:0.73rem; color:var(--text-secondary);">${escHtml(f.appid || "")}</td>
+                        <td style="font-size:0.73rem; color:var(--text-tertiary);">${escHtml((f.permissions || []).join(", "))}</td>
+                        <td style="font-size:0.75rem;">${who}</td>`;
+                    db.appendChild(tr);
+                });
+            }
+        }
+        const rb = document.getElementById("tblComRpcBody");
+        const eps = (d.rpc && d.rpc.endpoints) || [];
+        const sum = document.getElementById("comRpcSummary");
+        if (sum) {
+            const by = (d.rpc && d.rpc.by_protseq) || {};
+            sum.textContent = Object.keys(by).length ? ("— " + Object.keys(by).map(k => `${by[k]} ${k}`).join(", ")) : "";
+        }
+        if (rb) {
+            if (!eps.length) {
+                rb.innerHTML = `<tr><td colspan="4" style="text-align:center; color:var(--text-tertiary); padding:24px;">No RPC endpoints returned.</td></tr>`;
+            } else {
+                rb.innerHTML = "";
+                eps.forEach(e => {
+                    const tcp = e.protseq === "ncacn_ip_tcp";
+                    const tr = document.createElement("tr");
+                    if (tcp) tr.style.background = "rgba(224,175,104,0.08)";
+                    tr.innerHTML = `
+                        <td style="font-family:'Fira Code',monospace; font-size:0.72rem;">${escHtml(e.uuid || "")}</td>
+                        <td style="font-size:0.72rem; color:var(--text-tertiary);">${escHtml(e.version || "")}</td>
+                        <td style="font-family:'Fira Code',monospace; font-size:0.72rem; ${tcp ? 'color:#e0af68;' : 'color:var(--text-secondary);'}">${escHtml(e.binding || "")}</td>
+                        <td style="font-size:0.74rem;">${escHtml(e.annotation || "")}</td>`;
+                    rb.appendChild(tr);
+                });
+            }
+        }
+    }
+    const btnComRpcScan = document.getElementById("btnComRpcScan");
+    if (btnComRpcScan) {
+        btnComRpcScan.onclick = async () => {
+            const st = document.getElementById("comRpcStatus");
+            btnComRpcScan.disabled = true;
+            if (st) st.textContent = "Scanning…";
+            try {
+                const r = await fetch("/api/com_rpc_scan", { method: "POST" });
+                const d = await r.json();
+                renderComRpc(d);
+                if (st) {
+                    const nf = ((d.dcom && d.dcom.findings) || []).length;
+                    st.textContent = `${(d.rpc && d.rpc.count) || 0} RPC endpoints, ${nf} DCOM finding(s).`;
+                }
+            } catch (e) {
+                if (st) st.textContent = "Error!";
+                console.error("COM/RPC scan error:", e);
+            } finally {
+                btnComRpcScan.disabled = false;
+            }
+        };
+    }
+
+    // ── Active TLS certificate probe (COM/RPC tab) ────────────────────────────
+    function renderTlsProbe(d) {
+        const box = document.getElementById("tlsProbeResult");
+        if (!box) return;
+        box.style.display = "block";
+        if (!d.ok) {
+            box.innerHTML = `<span style="color:#ff6b6b;">${escHtml(d.risk_reason || "probe failed")}</span>`;
+            return;
+        }
+        const badge = d.trusted === true
+            ? `<span style="color:#9ece6a; font-weight:700;">TRUSTED</span>`
+            : `<span style="color:#ff6b6b; font-weight:700;">NOT TRUSTED</span>`;
+        const c = d.cert || {};
+        box.innerHTML =
+            `${badge} ${_peRiskBadge(d.severity)} <span style="color:var(--text-secondary);">${escHtml(d.risk_reason || "")}</span><br>`
+            + `<span style="color:var(--text-tertiary);">proto:</span> ${escHtml(d.protocol || "")} &nbsp; `
+            + `<span style="color:var(--text-tertiary);">cipher:</span> ${escHtml(d.cipher || "")}<br>`
+            + (c.subject_cn ? `<span style="color:var(--text-tertiary);">subject:</span> ${escHtml(c.subject_cn)} &nbsp; <span style="color:var(--text-tertiary);">issuer:</span> ${escHtml(c.issuer_cn || "")}<br>` : "")
+            + (c.not_after ? `<span style="color:var(--text-tertiary);">expires:</span> ${escHtml(c.not_after)}${c.expired ? ' <span style="color:#ff6b6b;">(EXPIRED)</span>' : ''} ${c.self_signed ? '<span style="color:#e0af68;">self-signed</span> ' : ''}${c.sig_alg ? '<span style="color:var(--text-tertiary);">sig:</span> ' + escHtml(c.sig_alg) : ''}<br>` : "")
+            + ((c.sans && c.sans.length) ? `<span style="color:var(--text-tertiary);">SANs:</span> ${escHtml(c.sans.join(", "))}<br>` : "")
+            + (d.sha256 ? `<span style="color:var(--text-tertiary);">sha256:</span> <code style="font-size:0.72rem;">${escHtml(d.sha256)}</code>` : "");
+    }
+    const btnTlsProbe = document.getElementById("btnTlsProbe");
+    if (btnTlsProbe) {
+        btnTlsProbe.onclick = async () => {
+            const host = (document.getElementById("tlsProbeHost").value || "").trim();
+            const port = parseInt(document.getElementById("tlsProbePort").value, 10) || 443;
+            const sni = (document.getElementById("tlsProbeSni").value || "").trim();
+            const st = document.getElementById("tlsProbeStatus");
+            if (!host) { if (st) st.textContent = "Enter a host."; return; }
+            btnTlsProbe.disabled = true;
+            if (st) st.textContent = "Probing…";
+            try {
+                const r = await fetch("/api/tls_probe", {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ host, port, server_hostname: sni })
+                });
+                const d = await r.json();
+                renderTlsProbe(d);
+                if (st) st.textContent = d.ok ? "" : (d.risk_reason || "failed");
+            } catch (e) {
+                if (st) st.textContent = "Error!";
+                console.error("TLS probe error:", e);
+            } finally {
+                btnTlsProbe.disabled = false;
+            }
+        };
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Privesc + Managed Secret scanners (safiyemonitor-08 lane)
+    // ═══════════════════════════════════════════════════════════════════════
+    const _RISK_STYLE = {
+        CRITICAL: {bg:"#7f1d1d", color:"#fecaca"}, HIGH: {bg:"rgba(255,107,107,0.18)", color:"#ff6b6b"},
+        MEDIUM: {bg:"rgba(224,175,104,0.18)", color:"#e0af68"}, LOW: {bg:"rgba(158,206,106,0.15)", color:"#9ece6a"},
+        INFO: {bg:"rgba(122,162,247,0.15)", color:"#7aa2f7"},
+    };
+    function _riskBadge(r) {
+        const s = _RISK_STYLE[r] || _RISK_STYLE.INFO;
+        return `<span style="display:inline-block; padding:1px 7px; border-radius:3px; font-size:0.67rem; font-weight:700; background:${s.bg}; color:${s.color};">${escHtml(r||"?")}</span>`;
+    }
+    async function _sendToVuln(findings, statusEl, source) {
+        try {
+            const r = await fetch("/api/vuln_add", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({findings, source: source||"scanner"})});
+            const d = await r.json();
+            if (statusEl) statusEl.textContent = d.status==="ok" ? `Sent ${d.added} → Vulnerabilities (${d.total} total).` : ("Error: "+(d.message||""));
+        } catch(e){ if(statusEl) statusEl.textContent="Send failed!"; console.error("send to vuln", e); }
+    }
+
+    // ── Privesc scan ─────────────────────────────────────────────────────────
+    let _privescFindings = [];
+    function renderPrivesc(findings) {
+        _privescFindings = findings || [];
+        const tbody = document.getElementById("tblPrivescBody");
+        if (!tbody) return;
+        if (!_privescFindings.length) {
+            tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--text-tertiary); padding:24px;">No privilege-escalation issues found.</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = "";
+        _privescFindings.forEach(f => {
+            const tr = document.createElement("tr");
+            if (f.risk === "HIGH" || f.risk === "CRITICAL") tr.style.background = "rgba(255,107,107,0.08)";
+            else if (f.risk === "MEDIUM") tr.style.background = "rgba(224,175,104,0.06)";
+            const writers = (f.principals||[]).map(p => `${escHtml(p.principal)} <span style="color:var(--text-tertiary);">${escHtml(p.rights||"")}</span>`).join("<br>") || "<span style='color:var(--text-tertiary);'>—</span>";
+            tr.innerHTML = `
+                <td>${_riskBadge(f.risk)}</td>
+                <td style="font-size:0.74rem; color:var(--text-secondary); font-family:'Fira Code',monospace;">${escHtml(f.category||"")}</td>
+                <td style="font-size:0.78rem;">${escHtml(f.title||"")}</td>
+                <td title="${escHtml(f.target||"")}" style="font-size:0.73rem; font-family:'Fira Code',monospace; color:var(--text-secondary); word-break:break-all;">${escHtml(f.target||"")}</td>
+                <td style="font-size:0.72rem;">${writers}</td>
+                <td style="font-size:0.73rem; color:var(--text-secondary);">${escHtml(f.detail||"")}${f.remediation?`<br><span style="color:#9ece6a;">Fix:</span> ${escHtml(f.remediation)}`:""}</td>`;
+            tbody.appendChild(tr);
+        });
+    }
+    const _btnPrivescScan = document.getElementById("btnPrivescScan");
+    if (_btnPrivescScan) {
+        _btnPrivescScan.onclick = async () => {
+            const dirEl = document.getElementById("privescDir");
+            const svcEl = document.getElementById("privescServices");
+            const st = document.getElementById("privescStatus");
+            _btnPrivescScan.disabled = true; if (st) st.textContent = "Scanning… (services + ACLs, can take a few seconds)";
+            try {
+                const r = await fetch("/api/privesc_scan", {method:"POST", headers:{"Content-Type":"application/json"},
+                    body: JSON.stringify({ target_dir:(dirEl&&dirEl.value||"").trim(), scan_services:!!(svcEl&&svcEl.checked) })});
+                const d = await r.json();
+                renderPrivesc(d.findings||[]);
+                const c = d.counts||{};
+                if (st) st.textContent = `${d.count} finding(s) — ${c.HIGH||0} high, ${c.MEDIUM||0} medium.`;
+                const toV = document.getElementById("btnPrivescToVuln"); if (toV) toV.disabled = !(d.findings||[]).length;
+            } catch(e) { if (st) st.textContent = "Error!"; console.error("privesc scan", e); }
+            finally { _btnPrivescScan.disabled = false; }
+        };
+    }
+    const _btnPrivescBrowse = document.getElementById("btnPrivescBrowse");
+    if (_btnPrivescBrowse) _btnPrivescBrowse.onclick = async () => { const r=await fetch("/api/browse_file"); const d=await r.json(); if(d.path){ const el=document.getElementById("privescDir"); if(el) el.value=d.path; } };
+    const _btnPrivescToVuln = document.getElementById("btnPrivescToVuln");
+    if (_btnPrivescToVuln) _btnPrivescToVuln.onclick = async () => {
+        const flagged = _privescFindings.filter(f => f.risk==="HIGH"||f.risk==="CRITICAL"||f.risk==="MEDIUM");
+        if (!flagged.length) return;
+        const findings = flagged.map(f => ({
+            severity: f.risk==="CRITICAL"?"CRITICAL":(f.risk==="HIGH"?"HIGH":"MEDIUM"),
+            title: `[Privesc] ${f.title}`,
+            description: f.detail || "",
+            evidence: `Target: ${f.target||""}` + ((f.principals||[]).length?`\nWriters: ${f.principals.map(p=>p.principal+" "+(p.rights||"")).join(", ")}`:""),
+            verification_steps: ["Confirm the ACL with: icacls \"<target>\"", "Verify a low-priv user can write/plant at the target path."],
+            exploitation_notes: f.remediation ? ("Remediation: "+f.remediation) : "",
+        }));
+        await _sendToVuln(findings, document.getElementById("privescStatus"), "privesc");
+    };
+
+    // ── Managed Secret scan ──────────────────────────────────────────────────
+    let _secretsData = null;
+
+    function _secNativeRows(findings) {
+        const tbody = document.getElementById("tblNativeSecretsBody");
+        if (!tbody) return;
+        if (!findings.length) {
+            tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; color:var(--text-tertiary); padding:18px;">No secret-like strings found.</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = "";
+        findings.forEach(f => {
+            const tr = document.createElement("tr");
+            if (f.severity === "HIGH") tr.style.background = "rgba(255,107,107,0.08)";
+            const revealed = (f.value !== undefined && f.value !== null);
+            const shown = revealed ? f.value : f.masked;
+            tr.innerHTML = `
+                <td>${_riskBadge(f.severity)}</td>
+                <td style="font-size:0.74rem; font-family:'Fira Code',monospace; color:var(--text-secondary);">${escHtml(f.category||"")}</td>
+                <td style="font-size:0.72rem; color:var(--text-tertiary);">${escHtml(f.enc||"")}</td>
+                <td style="font-size:0.72rem; color:var(--text-tertiary); font-family:'Fira Code',monospace;">${escHtml(f.section||"-")}</td>
+                <td style="font-size:0.72rem; color:var(--text-tertiary); font-family:'Fira Code',monospace;">0x${(f.offset||0).toString(16)}</td>
+                <td style="font-size:0.73rem; text-align:center;">${f.length||0}</td>
+                <td style="font-size:0.73rem; font-family:'Fira Code',monospace; color:${revealed?'#ff6b6b':'var(--text-secondary)'}; word-break:break-all;">${escHtml(String(shown==null?"":shown))}</td>
+                <td title="${escHtml(f.sha256||"")}" style="font-size:0.68rem; font-family:'Fira Code',monospace; color:var(--text-tertiary);">${escHtml((f.sha256||"").slice(0,16))}</td>`;
+            tbody.appendChild(tr);
+        });
+    }
+    function _secManagedRows(findings) {
+        const tbody = document.getElementById("tblSecretsBody");
+        if (!tbody) return;
+        tbody.innerHTML = "";
+        if (!findings.length) {
+            tbody.innerHTML = `<tr><td colspan="9" style="text-align:center; color:var(--text-tertiary); padding:18px;">No secret-like managed members found.</td></tr>`;
+            return;
+        }
+        findings.forEach(f => {
+            const tr = document.createElement("tr");
+            if (f.severity === "HIGH") tr.style.background = "rgba(255,107,107,0.08)";
+            const revealed = (f.value !== undefined && f.value !== null);
+            const shown = revealed ? f.value : f.masked_value;
+            tr.innerHTML = `
+                <td>${_riskBadge(f.severity)}</td>
+                <td title="${escHtml(f.type||"")}" style="font-size:0.72rem; font-family:'Fira Code',monospace; color:var(--text-secondary); word-break:break-all;">${escHtml(f.type||"")}</td>
+                <td style="font-size:0.76rem; font-weight:600;">${escHtml(f.member||"")}</td>
+                <td style="font-size:0.72rem; color:var(--text-tertiary);">${escHtml(f.kind||"")}</td>
+                <td style="font-size:0.72rem; color:var(--text-tertiary);">${f.is_public?"pub":"priv"}/${f.is_static?"stat":"inst"}</td>
+                <td style="font-size:0.73rem; text-align:center;">${f.length||0}</td>
+                <td style="font-size:0.73rem; font-family:'Fira Code',monospace; color:${revealed?'#ff6b6b':'var(--text-secondary)'}; word-break:break-all;">${escHtml(String(shown==null?"":shown))}</td>
+                <td title="${escHtml(f.sha256||"")}" style="font-size:0.68rem; font-family:'Fira Code',monospace; color:var(--text-tertiary);">${escHtml((f.sha256||"").slice(0,16))}</td>
+                <td style="font-size:0.72rem; color:var(--text-secondary); font-family:'Fira Code',monospace;">${escHtml(f.risk_label||"")}</td>`;
+            tbody.appendChild(tr);
+        });
+    }
+    function renderSecrets(data) {
+        _secretsData = data;
+        const native = (data && data.native) || { findings: [] };
+        const nf = native.findings || [];
+        _secNativeRows(nf);
+        const nmeta = document.getElementById("secretsNativeMeta");
+        if (nmeta) nmeta.textContent = data ? `— ${nf.length} finding(s), ${((native.scanned_bytes||0)/1048576).toFixed(1)}MB scanned${native.packed?" — packed binary, few strings":""}` : "";
+        const managedSec = document.getElementById("secretsManagedSection");
+        const managed = data && data.managed;
+        const mf = (managed && managed.findings) || [];
+        if (data && data.is_dotnet && managed) {
+            if (managedSec) managedSec.style.display = "";
+            _secManagedRows(mf);
+        } else if (managedSec) {
+            managedSec.style.display = "none";
+        }
+        const meta = document.getElementById("secretsMeta");
+        if (meta && data) {
+            meta.textContent = data.is_dotnet
+                ? `.NET (${data.arch||""}) — native strings + reflection [${((managed&&managed.mode)||"safe").toUpperCase()}]. ${nf.length} native + ${mf.length} managed finding(s).`
+                : `Native binary (${data.arch||"non-.NET"}) — strings scan only, no target code run. ${nf.length} finding(s).`;
+        }
+    }
+    const _btnSecretsScan = document.getElementById("btnSecretsScan");
+    if (_btnSecretsScan) {
+        _btnSecretsScan.onclick = async () => {
+            const pathEl = document.getElementById("secretsPath");
+            const revEl = document.getElementById("secretsReveal");
+            const deepEl = document.getElementById("secretsDeep");
+            const st = document.getElementById("secretsStatus");
+            const path = (pathEl&&pathEl.value||"").trim();
+            if (!path) { if(st) st.textContent="Enter or browse a file path."; return; }
+            const deep = !!(deepEl&&deepEl.checked);
+            if (deep && !confirm("DEEP scan runs the TARGET .NET assembly's static constructors — it EXECUTES code from the target binary in a child process (only applies if the file is .NET).\n\nOnly do this on a binary you trust or in an isolated VM.\n\nProceed with deep scan?")) return;
+            _btnSecretsScan.disabled=true; if(st) st.textContent = "Scanning…";
+            try {
+                const r = await fetch("/api/managed_secret_scan", {method:"POST", headers:{"Content-Type":"application/json"},
+                    body: JSON.stringify({ path, reveal: !!(revEl&&revEl.checked), deep })});
+                const d = await r.json();
+                if (d.status!=="ok") { if(st) st.textContent = "Error: "+(d.message||"scan failed"); renderSecrets(null); return; }
+                renderSecrets(d);
+                const nc = (d.native&&d.native.count)||0, mc = (d.managed&&d.managed.count)||0;
+                if (st) st.textContent = d.is_dotnet ? `${nc} native + ${mc} managed finding(s).` : `${nc} native finding(s) (not .NET).`;
+                const any = (nc + mc) > 0;
+                const ex=document.getElementById("btnSecretsExport"); if(ex) ex.disabled=!any;
+                const tv=document.getElementById("btnSecretsToVuln"); if(tv) tv.disabled=!any;
+            } catch(e){ if(st) st.textContent="Error!"; console.error("secret scan", e); }
+            finally { _btnSecretsScan.disabled=false; }
+        };
+    }
+    const _btnSecretsBrowse = document.getElementById("btnSecretsBrowse");
+    if (_btnSecretsBrowse) _btnSecretsBrowse.onclick = async () => { const r=await fetch("/api/browse_file"); const d=await r.json(); if(d.path){ const el=document.getElementById("secretsPath"); if(el) el.value=d.path; } };
+    const _btnSecretsExport = document.getElementById("btnSecretsExport");
+    if (_btnSecretsExport) _btnSecretsExport.onclick = () => {
+        if (!_secretsData) return;
+        const blob = new Blob([JSON.stringify(_secretsData, null, 2)], {type:"application/json"});
+        const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+        a.download = "secrets.json"; a.click(); URL.revokeObjectURL(a.href);
+    };
+    const _btnSecretsToVuln = document.getElementById("btnSecretsToVuln");
+    if (_btnSecretsToVuln) _btnSecretsToVuln.onclick = async () => {
+        const out = [];
+        ((_secretsData&&_secretsData.native&&_secretsData.native.findings)||[]).forEach(f => out.push({
+            severity: f.severity||"MEDIUM",
+            title: `[Native Secret] ${f.category} @ ${f.section||("0x"+(f.offset||0).toString(16))}`,
+            description: `Embedded ${f.category} (${f.enc}, len ${f.length}) found in ${f.section||"binary"} at offset 0x${(f.offset||0).toString(16)}.`,
+            evidence: `SHA-256: ${f.sha256||""}\nMasked: ${f.masked||""}`,
+            verification_steps: ["Open the binary in a hex editor / disassembler at the offset and confirm the secret.", "Rotate the secret if it is live."],
+            exploitation_notes: "Hardcoded secret material can decrypt traffic, forge tokens, or authenticate as the app.",
+        }));
+        ((_secretsData&&_secretsData.managed&&_secretsData.managed.findings)||[]).forEach(f => out.push({
+            severity: f.severity||"MEDIUM",
+            title: `[Managed Secret] ${f.risk_label} — ${f.type}.${f.member}`,
+            description: `Static ${f.kind} '${f.member}' (${f.value_type}, len ${f.length}) in ${f.type} looks like ${f.risk_label}.`,
+            evidence: `SHA-256: ${f.sha256||""}\nMasked: ${f.masked_value||""}`,
+            verification_steps: ["Open the assembly in dnSpy/ILSpy and inspect the member initializer.", "Correlate the SHA-256 with runtime crypto-boundary events if the process is hooked."],
+            exploitation_notes: "Embedded key/secret material can decrypt traffic, forge tokens, or authenticate as the app.",
+        }));
+        if (!out.length) return;
+        await _sendToVuln(out, document.getElementById("secretsStatus"), "secret");
+    };
+
+    // ── Memory credential scan (Tier-2: cred scan + post-logout cleanup) ──────
+    let _credFindings = [];
+    function renderCredScan(data) {
+        _credFindings = (data && data.findings) || [];
+        const st = document.getElementById("credScanStatus");
+        const tbody = document.getElementById("tblCredScanBody");
+        if (st && data) {
+            const t = data.truncated ? " (truncated — budget hit)" : "";
+            st.textContent = `${data.phase||"scan"}: ${_credFindings.length} finding(s), ${(data.scanned_bytes/1048576)|0}MB scanned${t}.`;
+        }
+        if (!tbody) return;
+        if (!_credFindings.length) {
+            tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:var(--text-tertiary); padding:18px;">No credential-like material found in memory.</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = "";
+        _credFindings.forEach(f => {
+            const tr = document.createElement("tr");
+            const notCleared = f.status && f.status.indexOf("NOT CLEARED") >= 0;
+            if (f.severity === "HIGH") tr.style.background = "rgba(255,107,107,0.08)";
+            tr.innerHTML = `
+                <td>${_riskBadge(f.severity||"MEDIUM")}</td>
+                <td style="font-size:0.74rem; font-family:'Fira Code',monospace; color:var(--text-secondary);">${escHtml(f.category||"")}</td>
+                <td style="font-size:0.72rem; color:var(--text-tertiary);">${escHtml(f.enc||"")}</td>
+                <td style="font-size:0.72rem; font-family:'Fira Code',monospace; color:var(--text-tertiary);">${escHtml(f.addr||"")}</td>
+                <td style="font-size:0.73rem; text-align:center;">${f.len||0}</td>
+                <td style="font-size:0.73rem; font-family:'Fira Code',monospace;">${escHtml(f.masked||"")}</td>
+                <td style="font-size:0.74rem; color:${notCleared ? '#ff6b6b' : 'var(--text-secondary)'};">${escHtml(f.status||"present")}</td>`;
+            tbody.appendChild(tr);
+        });
+    }
+    async function _credScan(phase) {
+        const st = document.getElementById("credScanStatus");
+        if (st) st.textContent = phase === "after" ? "Re-scanning memory (after logout)…" : "Scanning memory…";
+        try {
+            const r = await fetch("/api/memory_cred_scan", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({phase})});
+            const d = await r.json();
+            if (d.status !== "ok") { if (st) st.textContent = "Error: "+(d.message||"scan failed (is a process hooked?)"); return; }
+            renderCredScan(d);
+            const after = document.getElementById("btnCredScanAfter"); if (after) after.disabled = false;
+            const tv = document.getElementById("btnCredToVuln"); if (tv) tv.disabled = !(d.findings||[]).length;
+        } catch(e) { if (st) st.textContent = "Error!"; console.error("cred scan", e); }
+    }
+    const _btnCredBefore = document.getElementById("btnCredScanBefore");
+    if (_btnCredBefore) _btnCredBefore.onclick = () => _credScan("before");
+    const _btnCredAfter = document.getElementById("btnCredScanAfter");
+    if (_btnCredAfter) _btnCredAfter.onclick = () => _credScan("after");
+    const _btnCredToVuln = document.getElementById("btnCredToVuln");
+    if (_btnCredToVuln) _btnCredToVuln.onclick = async () => {
+        const findings = _credFindings.map(f => {
+            const notCleared = f.status && f.status.indexOf("NOT CLEARED") >= 0;
+            return {
+                severity: f.severity || "MEDIUM",
+                title: `[Memory Cred] ${f.category}${notCleared ? ' — not cleared after logout' : ''} @ ${f.addr}`,
+                description: `Credential-like ${f.category} (${f.enc}, len ${f.len}) found in process memory at ${f.addr}. ${f.status||""}`,
+                evidence: `Masked: ${f.masked||""}\nfp: ${f.fp||""}`,
+                verification_steps: ["Re-run the scan after logging out to confirm the secret is (not) cleared.", "Correlate the address with the app's credential handling."],
+                exploitation_notes: "Secrets left in process memory can be recovered by a local attacker or a memory dump.",
+            };
+        });
+        if (!findings.length) return;
+        await _sendToVuln(findings, document.getElementById("credScanStatus"), "memcreds");
+    };
 
     const pipeSearchEl = document.getElementById("pipeSearch");
     if (pipeSearchEl) pipeSearchEl.oninput = (e) => { pipeSearchText = e.target.value.trim(); rebuildPipeTable(); };
@@ -1976,13 +2763,23 @@ document.addEventListener("DOMContentLoaded", () => {
         const pInfo = pipeData.find(p => p.name === pipeName);
         const hintEl = document.getElementById("pipeHintBox");
         if (hintEl) {
+            let html = "";
             if (pInfo && pInfo.hint) {
-                const s = _CAT_STYLE[pInfo.category] || _CAT_STYLE.CUSTOM;
-                hintEl.innerHTML = `${_catBadge(pInfo.category)}<span style="color:var(--text-secondary); font-size:0.74rem;">${escHtml(pInfo.hint)}</span>`;
-                hintEl.style.display = "block";
-            } else {
-                hintEl.style.display = "none";
+                html += `${_catBadge(pInfo.category)}<span style="color:var(--text-secondary); font-size:0.74rem;">${escHtml(pInfo.hint)}</span>`;
             }
+            // DACL security detail: risk badge, owner, risky ACEs, and raw SDDL.
+            if (pInfo && pInfo.risk) {
+                const aces = (pInfo.risky_aces || [])
+                    .map(a => `${escHtml(a.name)} (${escHtml(a.mask)})`).join(", ");
+                html += `<div style="margin-top:5px; font-size:0.72rem; line-height:1.6;">`
+                     +  `${_pipeDaclBadge(pInfo)} <span style="color:var(--text-secondary);">${escHtml(pInfo.risk_reason || "")}</span>`
+                     +  (pInfo.owner ? `<br><span style="color:var(--text-tertiary);">owner:</span> <span style="color:var(--text-secondary);">${escHtml(pInfo.owner)}</span>` : "")
+                     +  (aces ? `<br><span style="color:var(--text-tertiary);">risky ACEs:</span> <span style="color:#ff8c00;">${aces}</span>` : "")
+                     +  (pInfo.sddl ? `<br><span style="color:var(--text-tertiary);">SDDL:</span> <code style="color:var(--text-secondary); font-size:0.7rem;">${escHtml(pInfo.sddl)}</code>` : "")
+                     +  `</div>`;
+            }
+            hintEl.innerHTML = html;
+            hintEl.style.display = html ? "block" : "none";
         }
     }
 
@@ -2259,7 +3056,7 @@ document.addEventListener("DOMContentLoaded", () => {
             <td><span style="font-size:0.74rem; padding:1px 5px; border-radius:3px; background:var(--bg-raised); color:var(--text-secondary);">${escHtml(ev.api || "")}</span></td>
             <td style="font-family:var(--font-mono); font-size:0.77rem; word-break:break-all;">${escHtml(ev.exe || "")}</td>
             <td style="font-family:var(--font-mono); font-size:0.77rem; word-break:break-all; color:var(--text-secondary);">${escHtml(ev.args || "")}${verbBadge}</td>
-            <td style="text-align:center;">${ev.elevated ? '<span style="color:#ff6b6b; font-weight:700;">🔴 YES</span>' : '<span style="color:var(--text-tertiary);">—</span>'}</td>
+            <td style="text-align:center;">${ev.elevated ? '<span style="color:#ff6b6b; font-weight:700;">YES</span>' : '<span style="color:var(--text-tertiary);">—</span>'}</td>
             <td style="font-size:0.77rem; color:var(--text-tertiary);">${escHtml(ev.caller_mod || "")}</td>`;
         tbody.appendChild(tr);
         while (tbody.rows.length > 1000) tbody.deleteRow(0);
@@ -2466,6 +3263,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 btnSaveHistory.disabled = true;
                 const resp = await fetch("/api/export_session");
                 const data = await resp.json();
+                data.vuln_findings = window.SafiyeUI.annotateFindings(data.vuln_findings || []);
                 const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
@@ -2478,7 +3276,7 @@ document.addEventListener("DOMContentLoaded", () => {
             } catch (e) {
                 alert("Save failed: " + e.message);
             } finally {
-                btnSaveHistory.textContent = "💾 Save History";
+                btnSaveHistory.textContent = "Save session";
                 btnSaveHistory.disabled = false;
             }
         };
@@ -2510,7 +3308,7 @@ document.addEventListener("DOMContentLoaded", () => {
             } catch (e) {
                 alert("Load failed: " + e.message);
             } finally {
-                btnLoadHistory.textContent = "📂 Load History";
+                btnLoadHistory.textContent = "Load session";
                 btnLoadHistory.disabled = false;
                 loadHistoryInput.value = "";
             }

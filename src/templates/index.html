@@ -9,6 +9,7 @@
         href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Inter:wght@400;500;600&display=swap"
         rel="stylesheet">
     <link rel="stylesheet" href="/static/css/style.css?v=4.5">
+    <link rel="stylesheet" href="/static/css/workspace.css?v=4">
 </head>
 
 <body>
@@ -29,12 +30,31 @@
 
             <div class="control-panel">
                 <div class="form-group">
-                    <label for="targetExe">Target Executable Path or PID</label>
-                    <div style="display:flex; gap:8px;">
-                        <input type="text" id="targetExe" placeholder="C:\path\to\target.exe or PID">
-                        <button id="btnBrowseExe" class="btn btn-neutral"
-                            style="flex:0 0 auto; padding:8px 10px;">📂</button>
+                    <label>Mode</label>
+                    <div id="hookModeSelector" style="display:flex; gap:16px; align-items:center; padding:2px 0;">
+                        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:0.82rem; color:var(--text-secondary); font-weight:normal;">
+                            <input type="radio" name="hookMode" id="modeSpawn" value="spawn" checked style="accent-color:var(--primary); cursor:pointer;">
+                            Spawn new process
+                        </label>
+                        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; font-size:0.82rem; color:var(--text-secondary); font-weight:normal;">
+                            <input type="radio" name="hookMode" id="modePid" value="pid" style="accent-color:var(--primary); cursor:pointer;">
+                            PID Attach
+                        </label>
                     </div>
+                </div>
+
+                <div class="form-group" id="spawnFields">
+                    <label for="targetExe">Target Executable Path</label>
+                    <div style="display:flex; gap:8px;">
+                        <input type="text" id="targetExe" placeholder="C:\path\to\target.exe">
+                        <button id="btnBrowseExe" class="btn btn-neutral"
+                            style="flex:0 0 auto; padding:8px 10px;">Browse</button>
+                    </div>
+                </div>
+
+                <div class="form-group" id="pidField" style="display:none;">
+                    <label for="targetPid">Process ID (PID)</label>
+                    <input type="text" id="targetPid" inputmode="numeric" placeholder="e.g. 21232 — attach to a running process">
                 </div>
 
                 <div class="form-group">
@@ -43,14 +63,14 @@
                     <button id="btnAddScript" class="btn btn-neutral" style="width:100%; margin-top:4px; font-size:0.78rem; padding:5px;">+ Add Script</button>
                 </div>
 
-                <div class="form-group">
+                <div class="form-group" id="argsField">
                     <label for="targetArgs">Command Arguments</label>
                     <input type="text" id="targetArgs" placeholder="Optional arguments...">
                 </div>
 
                 <div class="action-buttons">
                     <button id="btnStart" class="btn btn-primary">Start Spawn</button>
-                    <button id="btnAttach" class="btn btn-success">Reattach (PID/Name)</button>
+                    <button id="btnAttach" class="btn btn-success" style="display:none;" title="Attach to an already-running process by its PID (does not launch a new one)">Attach to PID</button>
                 </div>
                 <div class="action-buttons" style="margin-top:8px;">
                     <button id="btnStop" class="btn btn-danger" disabled>Stop</button>
@@ -64,10 +84,10 @@
                 <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border-color); display:flex; flex-direction:column; gap:6px;">
                     <div style="display:flex; gap:6px;">
                         <button id="btnSaveHistory" class="btn btn-neutral" style="flex:1; font-size:0.74rem; padding:6px 4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="Save current session to a JSON file">
-                            💾 Save
+                             Save
                         </button>
                         <button id="btnLoadHistory" class="btn btn-neutral" style="flex:1; font-size:0.74rem; padding:6px 4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="Load a previously saved session JSON file">
-                            📂 Load
+                             Load
                         </button>
                     </div>
                     <input type="file" id="loadHistoryInput" accept=".json" style="display:none;">
@@ -89,7 +109,7 @@
             </div>
 
             <div class="sidebar-art">
-                <img src="/static/Safiye.png?v=1" alt="Safiye - Micro-Hacker Unit 734">
+                <img src="/static/safiye-welcome-comic.png?v=1" alt="Comic-style Safiye, a white calico cat with green eyes, sitting beside a laptop" width="1536" height="1024" decoding="async">
             </div>
 
             <div class="status-panel">
@@ -116,9 +136,11 @@
                 <button class="tab-btn" data-target="tab-processes" id="tabBtnProcesses">Processes</button>
                 <button class="tab-btn" data-target="tab-crypto" id="tabBtnCrypto">Crypto</button>
                 <button class="tab-btn" data-target="tab-pipelist" id="tabBtnPipelist">Pipelist</button>
+                <button class="tab-btn" data-target="tab-privesc" id="tabBtnPrivesc">Privesc</button>
+                <button class="tab-btn" data-target="tab-secrets" id="tabBtnSecrets">Managed Secrets</button>
+                <button class="tab-btn" data-target="tab-comrpc" id="tabBtnComRpc">COM/RPC</button>
                 <span class="tab-group-sep" aria-hidden="true"></span>
                 <button class="tab-btn" data-target="tab-vulnerabilities" id="tabBtnVuln" style="background: rgba(255, 107, 107, 0.1); color: #ff6b6b; font-weight: 600;">Vulnerabilities <span id="vulnCountBadge" style="display:none; background:#ff6b6b; color:white; padding:0 6px; border-radius:10px; font-size:0.7rem;">0</span></button>
-                <button id="btnDensity" style="margin-left:auto; align-self:center; margin-right:8px; background:transparent; border:1px solid var(--border-color); color:var(--text-secondary); border-radius:5px; padding:3px 10px; font-size:0.68rem; font-weight:700; text-transform:uppercase; letter-spacing:0.8px; cursor:pointer; flex-shrink:0;" title="Toggle compact / comfortable row density">Compact</button>
             </div>
 
             <div class="tab-container">
@@ -219,6 +241,7 @@
                     <div id="historyDetailPanel" style="flex-shrink:0; height:215px; border-top:2px solid var(--primary); display:none; flex-direction:column; background:var(--bg-raised);">
                         <div style="flex-shrink:0; padding:4px 12px; background:var(--bg-surface); border-bottom:1px solid var(--border-color); display:flex; align-items:center; gap:6px;">
                             <span id="histDetailTitle" style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:0.8px; color:var(--primary); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Select a request to inspect</span>
+                            <span id="histDetailCorr" style="flex-shrink:0; display:flex; gap:6px; align-items:center;"></span>
                             <button class="hist-vtab active-hvtab" data-hv="utf8" style="padding:2px 9px; border-radius:4px; border:1px solid var(--primary); background:var(--primary-dim); color:var(--primary); font-size:0.72rem; cursor:pointer;">UTF-8</button>
                             <button class="hist-vtab" data-hv="hex" style="padding:2px 9px; border-radius:4px; border:1px solid var(--border-color); background:transparent; color:var(--text-secondary); font-size:0.72rem; cursor:pointer;">Hex</button>
                             <button class="hist-vtab" data-hv="utf16" style="padding:2px 9px; border-radius:4px; border:1px solid var(--border-color); background:transparent; color:var(--text-secondary); font-size:0.72rem; cursor:pointer;">UTF-16</button>
@@ -296,16 +319,16 @@
 
                 <!-- REPEATER TAB -->
                 <div id="tab-repeater" class="tab-content">
-                    <div class="intercept-layout" style="display:flex; flex-direction:column; height:100%;">
+                    <div class="repeater-workspace" style="display:flex; height:100%; min-height:0; background:var(--bg-surface);">
+                        <aside class="repeater-sidebar" style="width:280px; min-width:280px; max-width:280px; display:flex; flex-direction:column; border-right:1px solid var(--border-color); background:var(--bg-panel); overflow:hidden;">
+                            <div class="repeater-sidebar-header" style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 12px; border-bottom:1px solid var(--border-color); flex-shrink:0;">
+                                <span>Requests</span>
+                                <button id="btnNewRepeaterTab" class="btn repeater-new-tab-btn" style="padding:3px 9px; font-size:0.72rem; font-weight:700; border-radius:4px;">+ New</button>
+                            </div>
+                            <div id="repeaterTabsContainer" class="repeater-list" style="flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; padding:10px; display:flex; flex-direction:column; gap:0;"></div>
+                        </aside>
                         <div
-                            style="display:flex; padding:8px 16px; background-color:var(--bg-surface); border-bottom:1px solid var(--border-color); overflow-x:auto;">
-                            <div id="repeaterTabsContainer" style="display:flex; gap:4px; flex:1;"></div>
-                            <button id="btnNewRepeaterTab" class="btn"
-                                style="padding:4px 12px; font-weight:bold; background:var(--border-light); color:var(--text-primary); border-radius:4px;">+
-                                New Tab</button>
-                        </div>
-                        <div
-                            style="flex:1; padding:16px; display:flex; flex-direction:column; gap:16px; background-color:var(--bg-surface);">
+                            style="flex:1; min-width:0; padding:16px; display:flex; flex-direction:column; gap:16px; background-color:var(--bg-surface);">
                             <div style="display:flex; justify-content:space-between; align-items:center;">
                                 <h3 id="repeaterCurrentTabTitle">Repeater Request</h3>
                                 <div style="display:flex; gap:12px; align-items:center;">
@@ -322,6 +345,9 @@
                                     <button id="btnRepeaterSendCurl" class="btn btn-warning">Send as cURL</button>
                                     <button id="btnRepeaterSend" class="btn btn-neutral" title="Inject into the original live socket (only works while that connection is still open)">Send (live socket)</button>
                                     <button id="btnRepeaterTcpSend" class="btn btn-primary" title="Open a fresh TCP connection to the target and replay the bytes (works after the original connection closed)">Send (new TCP)</button>
+                                    <label style="display:inline-flex; align-items:center; gap:4px; font-size:0.74rem; color:var(--text-secondary); cursor:pointer; user-select:none;" title="Wrap the fresh connection in TLS before sending (required to replay an HTTPS request). Auto-enabled for :443.">
+                                        <input type="checkbox" id="repeaterTcpTls" style="cursor:pointer;"> TLS
+                                    </label>
                                 </div>
                             </div>
                             <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
@@ -364,7 +390,38 @@
                 </div>
 
                 <!-- DLL TAB -->
-                <div id="tab-dll" class="tab-content">
+                <div id="tab-dll" class="tab-content" style="overflow-y:auto;">
+                    <!-- PE / binary protection analysis -->
+                    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 12px; background:var(--bg-surface); border-bottom:1px solid var(--border-color);">
+                        <span style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--text-tertiary);">PE Protections</span>
+                        <input id="peScanPath" placeholder="exe path or folder (defaults to target exe)" style="flex:1; min-width:220px; background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:5px 9px; color:var(--text-primary); font-size:0.8rem; font-family:'Fira Code',monospace;">
+                        <label style="display:inline-flex; align-items:center; gap:4px; font-size:0.74rem; color:var(--text-secondary); cursor:pointer; user-select:none;"><input type="checkbox" id="peScanRecursive"> recursive</label>
+                        <button id="btnPeScan" class="btn btn-primary" style="font-size:0.78rem; padding:5px 14px;">Scan PE Protections</button>
+                        <span id="peScanStatus" style="font-size:0.73rem; color:var(--accent);"></span>
+                    </div>
+                    <div style="overflow-x:auto;">
+                        <table id="tblPeScan" class="data-table" style="width:100%;">
+                            <thead>
+                                <tr>
+                                    <th width="22%">Module</th>
+                                    <th width="6%">Arch</th>
+                                    <th width="7%">ASLR</th>
+                                    <th width="7%">DEP</th>
+                                    <th width="7%">CFG</th>
+                                    <th width="7%">SEH</th>
+                                    <th width="13%">Signature</th>
+                                    <th width="9%">Risk</th>
+                                    <th>Notes</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tblPeScanBody">
+                                <tr><td colspan="9" style="text-align:center; color:var(--text-tertiary); padding:24px;">Enter a target exe or folder and click <strong>Scan PE Protections</strong>. Missing ASLR/DEP/CFG or an unsigned app binary is flagged.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- LoadLibrary events -->
+                    <div style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--text-tertiary); padding:12px 12px 4px;">Module Load Events</div>
                     <table id="tblDll" class="data-table">
                         <thead>
                             <tr>
@@ -394,6 +451,32 @@
                             <input type="text" id="memorySearch" placeholder="Filter strings (e.g. admin)..."
                                 style="width: 250px; padding: 6px;">
                         </div>
+                    </div>
+                    <!-- Memory credential scan (Tier-2: cred scan + post-logout cleanup) -->
+                    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 12px; background:var(--bg-raised); border-bottom:1px solid var(--border-color);">
+                        <span style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--text-tertiary);">Credential Scan</span>
+                        <button id="btnCredScanBefore" class="btn btn-primary" style="font-size:0.78rem; padding:5px 12px;">Scan memory for creds</button>
+                        <button id="btnCredScanAfter" class="btn btn-neutral" style="font-size:0.78rem; padding:5px 12px;" disabled>Re-scan after logout + compare</button>
+                        <button id="btnCredToVuln" class="btn btn-neutral" style="font-size:0.78rem; padding:5px 12px;" disabled>Send → Vulnerabilities</button>
+                        <span id="credScanStatus" style="font-size:0.73rem; color:var(--accent);">Needs an active hook. Scan, log out in the app, then re-scan to check secret cleanup.</span>
+                    </div>
+                    <div style="overflow-x:auto; max-height:220px; overflow-y:auto; border-bottom:1px solid var(--border-color);">
+                        <table id="tblCredScan" class="data-table" style="width:100%;">
+                            <thead>
+                                <tr>
+                                    <th width="8%">Sev</th>
+                                    <th width="18%">Category</th>
+                                    <th width="8%">Enc</th>
+                                    <th width="16%">Address</th>
+                                    <th width="7%">Len</th>
+                                    <th width="16%">Masked</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tblCredScanBody">
+                                <tr><td colspan="7" style="text-align:center; color:var(--text-tertiary); padding:18px;">Hook a process, then click <strong>Scan memory for creds</strong>.</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                     <div style="flex: 1; overflow-y: auto;">
                         <table id="tblMemory" class="data-table">
@@ -610,9 +693,10 @@
                             <button class="pipe-flt" data-pf="ALL"         style="padding:3px 10px; font-size:0.75rem; border:none; cursor:pointer; background:var(--primary); color:#fff;">All</button>
                             <button class="pipe-flt" data-pf="ACCESSIBLE"  style="padding:3px 10px; font-size:0.75rem; border:none; cursor:pointer; background:var(--bg-raised); color:var(--text-secondary);">Accessible</button>
                             <button class="pipe-flt" data-pf="INTERESTING" style="padding:3px 10px; font-size:0.75rem; border:none; cursor:pointer; background:var(--bg-raised); color:var(--text-secondary);">Interesting</button>
+                            <button class="pipe-flt" data-pf="WEAKDACL" style="padding:3px 10px; font-size:0.75rem; border:none; cursor:pointer; background:var(--bg-raised); color:var(--text-secondary);">Weak DACL</button>
                         </div>
                         <button id="btnListPipes" class="btn btn-neutral" style="font-size:0.78rem; padding:4px 12px;">List</button>
-                        <button id="btnScanPipes" class="btn btn-primary" style="font-size:0.78rem; padding:4px 12px;">Scan (test access)</button>
+                        <button id="btnScanPipes" class="btn btn-primary" style="font-size:0.78rem; padding:4px 12px;">Scan (access + DACL)</button>
                         <span id="pipeCount" style="font-size:0.73rem; color:var(--text-tertiary);">—</span>
                         <span id="pipeScanStatus" style="font-size:0.73rem; color:var(--accent); margin-left:4px;"></span>
                     </div>
@@ -623,12 +707,13 @@
                                 <tr>
                                     <th width="5%">#</th>
                                     <th>Pipe Name</th>
-                                    <th width="11%">Accessible?</th>
-                                    <th width="32%">Pentest Value / Reason</th>
+                                    <th width="9%">Accessible?</th>
+                                    <th width="11%">DACL Risk</th>
+                                    <th width="30%">Pentest Value / Reason</th>
                                 </tr>
                             </thead>
                             <tbody id="tblPipelistBody">
-                                <tr><td colspan="4" style="text-align:center; color:var(--text-tertiary); padding:32px;">Click <strong>List</strong> to enumerate pipes, or <strong>Scan (test access)</strong> to also check which ones you can connect to.</td></tr>
+                                <tr><td colspan="5" style="text-align:center; color:var(--text-tertiary); padding:32px;">Click <strong>List</strong> to enumerate pipes, or <strong>Scan</strong> to also test access and analyze each pipe's DACL.</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -666,6 +751,140 @@
                                 <div id="pipeRecvArea" style="flex:1; overflow-y:auto; font-family:'Fira Code', monospace; font-size:0.75rem; color:var(--text-secondary); line-height:1.55; background:var(--bg-surface); border:1px solid var(--border-color); border-radius:4px; padding:6px 8px;"></div>
                             </div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- PRIVESC TAB — Local privilege-escalation surface -->
+                <div id="tab-privesc" class="tab-content" style="overflow-y:auto;">
+                    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 12px; background:var(--bg-surface); border-bottom:1px solid var(--border-color);">
+                        <span style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--text-tertiary);">Local Privesc</span>
+                        <input id="privescDir" placeholder="app install dir (optional — for DLL-hijack / writable / insecure-update checks)" style="flex:1; min-width:240px; background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:5px 9px; color:var(--text-primary); font-size:0.8rem; font-family:'Fira Code',monospace;">
+                        <button id="btnPrivescBrowse" class="btn btn-neutral" style="font-size:0.78rem; padding:5px 12px;">Browse…</button>
+                        <label style="display:inline-flex; align-items:center; gap:4px; font-size:0.74rem; color:var(--text-secondary); cursor:pointer; user-select:none;"><input type="checkbox" id="privescServices" checked> scan services</label>
+                        <button id="btnPrivescScan" class="btn btn-primary" style="font-size:0.78rem; padding:5px 14px;">Scan Privesc</button>
+                        <button id="btnPrivescToVuln" class="btn btn-neutral" style="font-size:0.78rem; padding:5px 12px;" disabled>Send flagged → Vulnerabilities</button>
+                        <span id="privescStatus" style="font-size:0.73rem; color:var(--accent);"></span>
+                    </div>
+                    <div style="overflow-x:auto;">
+                        <table id="tblPrivesc" class="data-table" style="width:100%;">
+                            <thead>
+                                <tr>
+                                    <th width="8%">Risk</th>
+                                    <th width="16%">Category</th>
+                                    <th width="24%">Finding</th>
+                                    <th width="24%">Target</th>
+                                    <th width="14%">Low-priv writers</th>
+                                    <th>Detail</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tblPrivescBody">
+                                <tr><td colspan="6" style="text-align:center; color:var(--text-tertiary); padding:24px;">Click <strong>Scan Privesc</strong> to enumerate unquoted service paths, writable service binaries/dirs, and (with an app dir) DLL-planting candidates + insecure HTTP update URLs. Read-only, no admin required.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- MANAGED SECRETS TAB — .NET reflection secret scan -->
+                <div id="tab-secrets" class="tab-content" style="overflow-y:auto;">
+                    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 12px; background:var(--bg-surface); border-bottom:1px solid var(--border-color);">
+                        <span style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--text-tertiary);">Secrets</span>
+                        <input id="secretsPath" placeholder="any .exe / .dll path (native or .NET)" style="flex:1; min-width:240px; background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:5px 9px; color:var(--text-primary); font-size:0.8rem; font-family:'Fira Code',monospace;">
+                        <button id="btnSecretsBrowse" class="btn btn-neutral" style="font-size:0.78rem; padding:5px 12px;">Browse…</button>
+                        <label style="display:inline-flex; align-items:center; gap:4px; font-size:0.74rem; color:#ff6b6b; font-weight:600; cursor:pointer; user-select:none;" title="DEEP scan loads the assembly and reads runtime static values, which runs the target's static constructors (executes target code). Leave off for a safe reflection-only scan."><input type="checkbox" id="secretsDeep">  deep (runs target code)</label>
+                        <label style="display:inline-flex; align-items:center; gap:4px; font-size:0.74rem; color:#e0af68; cursor:pointer; user-select:none;" title="Reveal raw values locally for operator validation (deep scan only; values otherwise masked)."><input type="checkbox" id="secretsReveal"> reveal values (local)</label>
+                        <button id="btnSecretsScan" class="btn btn-primary" style="font-size:0.78rem; padding:5px 14px;">Scan</button>
+                        <button id="btnSecretsExport" class="btn btn-neutral" style="font-size:0.78rem; padding:5px 12px;" disabled>Export JSON</button>
+                        <button id="btnSecretsToVuln" class="btn btn-neutral" style="font-size:0.78rem; padding:5px 12px;" disabled>Send → Vulnerabilities</button>
+                        <span id="secretsStatus" style="font-size:0.73rem; color:var(--accent);"></span>
+                    </div>
+                    <div style="padding:5px 12px; font-size:0.72rem; color:var(--text-tertiary); border-bottom:1px solid var(--border-color);"><span id="secretsMeta">Auto-detects the target. Native strings scan (read-only, runs NO target code) works on ANY binary — C/C++/Delphi/Go/Rust or .NET. For a .NET assembly, reflection is also offered (SAFE metadata, or  DEEP which runs target code).</span></div>
+
+                    <!-- Native strings scan — universal, always runs -->
+                    <div style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--text-tertiary); padding:8px 12px 2px;">Native strings (any binary) <span id="secretsNativeMeta" style="font-weight:400; text-transform:none; color:var(--text-tertiary);"></span></div>
+                    <div style="overflow-x:auto;">
+                        <table id="tblNativeSecrets" class="data-table" style="width:100%;">
+                            <thead>
+                                <tr>
+                                    <th width="7%">Sev</th>
+                                    <th width="18%">Category</th>
+                                    <th width="8%">Enc</th>
+                                    <th width="12%">Section</th>
+                                    <th width="12%">Offset</th>
+                                    <th width="7%">Len</th>
+                                    <th width="18%">Value</th>
+                                    <th>SHA-256</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tblNativeSecretsBody">
+                                <tr><td colspan="8" style="text-align:center; color:var(--text-tertiary); padding:18px;">Pick any .exe/.dll and click <strong>Scan</strong>. Read-only strings scan — no target code runs.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Managed reflection — .NET assemblies only -->
+                    <div id="secretsManagedSection" style="display:none;">
+                        <div style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--text-tertiary); padding:12px 12px 2px;">Managed reflection (.NET only)</div>
+                        <div style="overflow-x:auto;">
+                            <table id="tblSecrets" class="data-table" style="width:100%;">
+                                <thead>
+                                    <tr>
+                                        <th width="7%">Sev</th>
+                                        <th width="20%">Type</th>
+                                        <th width="14%">Member</th>
+                                        <th width="8%">Kind</th>
+                                        <th width="8%">Pub/Stat</th>
+                                        <th width="7%">Len</th>
+                                        <th width="16%">Value</th>
+                                        <th width="12%">SHA-256</th>
+                                        <th>Risk</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="tblSecretsBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- COM/RPC TAB -->
+                <div id="tab-comrpc" class="tab-content" style="overflow-y:auto;">
+                    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 12px; background:var(--bg-surface); border-bottom:1px solid var(--border-color);">
+                        <span style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--text-tertiary);">COM / RPC</span>
+                        <button id="btnComRpcScan" class="btn btn-primary" style="font-size:0.78rem; padding:5px 14px;">Scan COM/RPC</button>
+                        <span id="comRpcStatus" style="font-size:0.73rem; color:var(--accent);"></span>
+                    </div>
+                    <div style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--text-tertiary); padding:12px 12px 2px;">TLS certificate probe <span style="font-weight:400; text-transform:none; color:var(--text-tertiary);">— connects OUTBOUND to the host:port you enter (authorized targets only)</span></div>
+                    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:2px 12px 8px;">
+                        <input id="tlsProbeHost" placeholder="host or ip" style="width:200px; background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:5px 9px; color:var(--text-primary); font-size:0.8rem; font-family:'Fira Code',monospace;">
+                        <input id="tlsProbePort" placeholder="port" value="443" style="width:70px; background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:5px 9px; color:var(--text-primary); font-size:0.8rem; font-family:'Fira Code',monospace;">
+                        <input id="tlsProbeSni" placeholder="SNI (optional)" style="width:170px; background:var(--bg-raised); border:1px solid var(--border-color); border-radius:5px; padding:5px 9px; color:var(--text-primary); font-size:0.8rem; font-family:'Fira Code',monospace;">
+                        <button id="btnTlsProbe" class="btn btn-primary" style="font-size:0.78rem; padding:5px 14px;">Probe TLS</button>
+                        <span id="tlsProbeStatus" style="font-size:0.73rem; color:var(--accent);"></span>
+                    </div>
+                    <div id="tlsProbeResult" style="display:none; margin:0 12px 10px; padding:8px 12px; background:var(--bg-raised); border:1px solid var(--border-color); border-radius:6px; font-size:0.78rem; line-height:1.7;"></div>
+                    <div style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--text-tertiary); padding:10px 12px 4px; border-top:1px solid var(--border-color);">DCOM — weak AppID permissions (low-privilege REMOTE activate/launch)</div>
+                    <div style="overflow-x:auto;">
+                        <table class="data-table" style="width:100%;">
+                            <thead><tr>
+                                <th width="9%">Risk</th>
+                                <th width="20%">Name</th>
+                                <th width="24%">AppID</th>
+                                <th width="13%">Permission</th>
+                                <th>Low-priv principal(s) → rights</th>
+                            </tr></thead>
+                            <tbody id="tblComDcomBody"><tr><td colspan="5" style="text-align:center; color:var(--text-tertiary); padding:24px;">Click <strong>Scan COM/RPC</strong>. AppIDs whose Launch/Access permission lets Everyone / Users <em>remotely</em> activate are flagged (local-only rights are normal and skipped).</td></tr></tbody>
+                        </table>
+                    </div>
+                    <div style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--text-tertiary); padding:12px 12px 4px;">RPC endpoint mapper <span id="comRpcSummary" style="font-weight:400; text-transform:none; color:var(--text-secondary);"></span></div>
+                    <div style="overflow-x:auto;">
+                        <table class="data-table" style="width:100%;">
+                            <thead><tr>
+                                <th width="26%">Interface UUID</th>
+                                <th width="6%">Ver</th>
+                                <th width="26%">Binding</th>
+                                <th>Annotation</th>
+                            </tr></thead>
+                            <tbody id="tblComRpcBody"><tr><td colspan="4" style="text-align:center; color:var(--text-tertiary); padding:24px;">RPC endpoints appear here after a scan. Network-reachable (ncacn_ip_tcp) interfaces are highlighted.</td></tr></tbody>
+                        </table>
                     </div>
                 </div>
             </div>
@@ -763,94 +982,10 @@
         </ul>
     </div>
 
-    <script src="/static/js/app.js?v=20.0"></script>
+    <script src="/static/js/workspace.js?v=1"></script>
+    <script src="/static/js/app.js?v=22.0"></script>
 
-    <!-- Pixel art walking Calico cat — Safiye Edition -->
-    <style>
-        #sfcat {
-            position: fixed;
-            bottom: 5px;
-            z-index: 9999;
-            pointer-events: none;
-            user-select: none;
-            image-rendering: pixelated;
-        }
-    </style>
-    <canvas id="sfcat"></canvas>
-    <script src="/static/js/catwalk.js?v=6"></script>
-    <script type="text/plain" id="__catwalk_disabled">
-    (function () {
-        var cv  = document.getElementById('sfcat');
-        if (!cv) return;
-        var ctx = cv.getContext('2d');
-        ctx.imageSmoothingEnabled = false;
-
-        var _ = null;
-        var W = '#ffffff';   // White base
-        var O = '#ff8c00';   // Orange spots
-        var B = '#2b2b2b';   // Black spots
-        var P = '#ff9ff3';   // Pink nose
-        var E = '#2ecc71';   // Green eyes
-        var t = '#1a1a1a';   // Far legs
-        var L = '#00e5ff';   // SAFIYE text (Neon Cyan)
-
-        var S = 4, CW = 24, CH = 16; 
-        cv.width  = CW * S;
-        cv.height = CH * S;
-
-        var BODY = [
-          // CAT BODY (Positioned clean)
-          [_,_,_,_, _,_,_,_, _,_,_,_, _,_, _,_, _,_, _,_, _,_,_,_],
-          [_,_,_,_, _,_,_,_, _,_,_,_, _,_, _,_, _,_, _,_, _,_,_,_],
-          [_,_,_,_, _,B,_,_, _,_,_,_, _,_, _,_, _,B, _,O, _,_,_,_],
-          [_,_,_,_, _,B,_,_, _,_,_,_, _,_, _,_, B,W, B,W, O,_,_,_],
-          [_,_,_,_, _,O,_,_, _,_,_,_, _,_, _,W, W,O, O,W, W,_,_,_],
-          [_,_,_,_, _,O,_,_, _,_,_,_, _,_, W,W, E,W, E,W, W,_,_,_],
-          [_,_,_,_, _,O,_,_, _,_,_,_, _,_, W,B, B,P, W,W, W,_,_,_],
-          [_,_,_,_, _,O,B,W, W,W,B,B, W,O, O,O, W,W, W,W, _,_,_,_],
-          [_,_,_,_, _,_,B,W, W,O,O,O, W,W, B,B, W,W, W,_, _,_,_,_],
-          [_,_,_,_, _,_,_,W, W,W,W,W, W,W, W,W, W,W, _,_, _,_,_,_]
-        ];
-
-        var WALK = [
-          [ [_,_,_,_, _,_,_,B, W,_,_,_, _,_,W,B, _,_,_,_, _,_,_,_],
-            [_,_,_,_, _,_,B,B, _,_,_,_, _,W,W,_, _,_,_,_, _,_,_,_] ],
-          [ [_,_,_,_, _,_,_,W, B,_,_,_, _,_,B,W, _,_,_,_, _,_,_,_],
-            [_,_,_,_, _,_,_,W, B,_,_,_, _,_,_,W, B,_,_,_, _,_,_,_] ]
-        ];
-
-        var frame = 0, ftick = 0, FDUR = 9;
-        var x = Math.random() * (window.innerWidth - CW * S);
-        var dir = 1, spd = 0.7;
-
-        function draw() {
-            ctx.clearRect(0, 0, cv.width, cv.height);
-            ctx.save();
-            if (dir === -1) { ctx.translate(CW * S, 0); ctx.scale(-1, 1); }
-            var rows = BODY.concat(WALK[frame]);
-            for (var r = 0; r < rows.length; r++) {
-                for (var c = 0; c < CW; c++) {
-                    if (rows[r][c]) {
-                        ctx.fillStyle = rows[r][c];
-                        ctx.fillRect(c * S, r * S, S, S);
-                    }
-                }
-            }
-            ctx.restore();
-        }
-
-        function tick() {
-            x += dir * spd;
-            if (x > window.innerWidth - CW * S) { x = window.innerWidth - CW * S; dir = -1; }
-            if (x < 0) { x = 0; dir = 1; }
-            cv.style.left = x + 'px';
-            if (++ftick >= FDUR) { ftick = 0; frame ^= 1; }
-            draw();
-            requestAnimationFrame(tick);
-        }
-        requestAnimationFrame(tick);
-    }());
-    </script>
+    <!-- Walking mascot is shelved; its source and artwork are kept for later. -->
 </body>
 
 </html>
