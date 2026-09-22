@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="assets/screenshots/workspace-01-welcome.png" alt="Safiye's graphite workspace with the calico welcome mascot and grouped navigation" width="100%">
+  <img src="assets/safiye-readme-banner.png" alt="Safiye, the green-eyed calico mascot, stretching out beside a laptop" width="100%">
+</p>
+
+<p align="center">
+  Runtime security analysis for Windows desktop apps, with live traffic, runtime monitors, and AI-assisted findings.
 </p>
 
 <p align="center">
@@ -88,7 +92,7 @@ The module event table is not a complete inventory of already-loaded DLLs. It sh
 ## Architecture
 
 <p align="center">
-  <img src="assets/architecture.png" alt="Architecture" width="90%">
+  <img src="assets/architecture.png" alt="Architecture: the Frida agent sends events to the Safiye server, which connects to the browser UI and an optional AI assistant through the MCP server" width="100%">
 </p>
 
 The Frida agent inside the target streams events to the Safiye server (FastAPI with a WebSocket hub), which pushes them live to the browser UI. For AI analysis, a separate MCP server bridges Claude to the server's REST API.
