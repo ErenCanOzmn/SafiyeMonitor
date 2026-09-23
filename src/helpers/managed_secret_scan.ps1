@@ -21,6 +21,7 @@ param(
     [switch]$Deep
 )
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
 # .NET regex IgnoreCase defaults to the CURRENT culture. On a Turkish (tr-TR)
 # machine that breaks ASCII 'I'/'i' case folding, so [A-Za-z] and even a literal
@@ -34,10 +35,7 @@ function Test-Rx([string]$s, [string]$pat) {
 
 function New-Masked([string]$s) {
     if ($null -eq $s) { return '' }
-    $n = $s.Length
-    if ($n -le 4) { return ('*' * $n) }
-    if ($n -le 8) { return ($s.Substring(0,2) + ('*' * ($n-2))) }
-    return ($s.Substring(0,4) + ('*' * [Math]::Min($n-6, 12)) + $s.Substring($n-2))
+    return '[redacted]'
 }
 function Get-Sha256Hex([byte[]]$bytes) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -46,6 +44,8 @@ function Get-Sha256Hex([byte[]]$bytes) {
 }
 # name -> (risk_label, severity)   (CultureInvariant via Test-Rx)
 function Classify([string]$name) {
+    if (Test-Rx $name '(username|user.?id|kullanici|kullan\u0131c\u0131|login.?name)') { return @('embedded_username','INFO') }
+    if (Test-Rx $name '(url|uri|endpoint|host|ip.?address)') { return @('endpoint_reference','INFO') }
     if     (Test-Rx $name '(kripto|_iv\b|\biv\b|aes.?key|des.?key|crypt.?key|\bkey\b)')           { return @('embedded_crypto_key','HIGH') }
     elseif (Test-Rx $name '(private.?key|priv.?key|rsa.?key|pem)')                                 { return @('private_key','HIGH') }
     elseif (Test-Rx $name '(connection.?string|conn.?str|connstr|datasource|initial.?catalog)')   { return @('connection_string','HIGH') }
@@ -55,7 +55,7 @@ function Classify([string]$name) {
     elseif (Test-Rx $name '(salt|hmac|signing)')                                                   { return @('crypto_material','MEDIUM') }
     else                                                                                           { return @('possible_secret','MEDIUM') }
 }
-$namePattern = '(kripto|sifre|secret|passphrase|password|passwd|\bpwd\b|parola|token|jwt|db.?sifre|connection.?string|conn.?str|connstr|api.?key|apikey|access.?key|client.?secret|app.?secret|private.?key|priv.?key|\bkey\b|\biv\b|salt|hmac|bearer|crypt|aes|rsa|des|signing|credential)'
+$namePattern = '(username|user.?id|kullanici|kullan\u0131c\u0131|login.?name|url|uri|endpoint|host|ip.?address|kripto|sifre|\u015fifre|secret|passphrase|password|passwd|\bpwd\b|parola|token|jwt|db.?sifre|connection.?string|conn.?str|connstr|api.?key|apikey|access.?key|client.?secret|app.?secret|private.?key|priv.?key|\bkey\b|\biv\b|salt|hmac|bearer|crypt|aes|rsa|des|signing|credential)'
 
 function Shannon([string]$s) {
     if ([string]::IsNullOrEmpty($s)) { return 0.0 }
@@ -99,16 +99,21 @@ try {
             elseif ($val -is [char[]]) { $vtype='char[]'; $s=(-join $val); $length=$s.Length; $sha=(Get-Sha256Hex ([System.Text.Encoding]::UTF8.GetBytes($s))); $masked=(New-Masked $s) }
             else { $vtype='string'; $s=[string]$val; $length=$s.Length; $sha=(Get-Sha256Hex ([System.Text.Encoding]::UTF8.GetBytes($s))); $masked=(New-Masked $s) }
             if ($length -eq 0) { return }
+            if ($vtype -eq 'string' -and (Test-Rx $s '^(password|username|secret|token|changeme|sample|example|dummy|null|true|false|\*+|x+)$|demo[_ -]?only|not[_ -]?a[_ -]?real|^\$\{|^%[^%]+%$')) { return }
         }
         $cls = Classify $memberName
-        $label = $cls[0]; $sev = $cls[1]
-        if ($shapeOnly) { $label = 'high_entropy_value'; $sev = 'MEDIUM' }
+        $label = $cls[0]; $sev = 'INFO'
+        if ($shapeOnly) { return }
         $item = [ordered]@{
             type=$typeName; member=$memberName; kind=$kind; is_public=[bool]$isPublic; is_static=$true
             value_type=$vtype; value_available=[bool]$valueAvailable; length=$length; sha256=$sha
             masked_value=$masked; risk_label=$label; severity=$sev
+            validation_status=$(if (-not $valueAvailable -or $label -eq 'endpoint_reference') {'inventory'} else {'needs_review'})
+            confidence=$(if ($valueAvailable) {'medium'} else {'low'})
+            value_origin=$(if (-not $valueAvailable) {'name_only'} elseif ($Deep) {'runtime_static'} else {'metadata_literal'})
+            basis='Member name/value inventory; credential validity and security impact are unverified.'
         }
-        if ($Reveal -and $Deep -and $valueAvailable) {
+        if ($Reveal -and $valueAvailable) {
             if ($val -is [byte[]]) { $item['value'] = ([BitConverter]::ToString($val) -replace '-','') }
             elseif ($val -is [char[]]) { $item['value'] = (-join $val) }
             else { $item['value'] = [string]$val }

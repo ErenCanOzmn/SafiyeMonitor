@@ -13,6 +13,7 @@
         set(key, value) { try { localStorage.setItem('safiye.ui.' + key, String(value)); } catch {} }
     };
     let sessionActive = false, startedAt = null, selectedFinding = null;
+    let archiveMetadata = null;
     const reviewStates = new Map();
     const findingKey = f => JSON.stringify([f.source || f.detector || '', f.title, f.evidence || '']);
     const reviewOptions = ['Unreviewed', 'In review', 'Confirmed', 'Dismissed'];
@@ -23,6 +24,7 @@
         if (connected !== undefined) document.body.classList.toggle('server-connected', connected);
         if (active !== undefined) {
             if (active && !sessionActive) {
+                archiveMetadata = null;
                 startedAt = Date.now();
                 updateTarget();
                 byId('sessionSetup').close();
@@ -40,7 +42,7 @@
             }
         }
         const online = document.body.classList.contains('server-connected');
-        byId('sessionState').textContent = !online ? 'Disconnected' : sessionActive ? 'Recording' : 'Ready';
+        byId('sessionState').textContent = !online ? 'Disconnected' : sessionActive ? 'Recording' : archiveMetadata ? 'Loaded' : 'Ready';
         byId('sessionState').dataset.state = !online ? 'offline' : sessionActive ? 'active' : 'ready';
         if (!startedAt) byId('sessionElapsed').textContent = '00:00:00';
     }
@@ -74,11 +76,26 @@
         select.id = 'findingReviewStatus';
         reviewOptions.forEach(value => { const option = make('option', '', value); option.value = value; select.append(option); });
         select.value = reviewStates.get(key) || 'Unreviewed';
-        select.addEventListener('change', () => {
+        select.addEventListener('change', async () => {
             reviewStates.set(key, select.value);
             document.querySelectorAll('.finding-row').forEach(row => {
                 if (row.dataset.key === key) row.querySelector('.review-label').textContent = select.value;
             });
+            select.disabled = true;
+            try {
+                const response = await fetch('/api/finding_review', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: finding.title || '', target: finding.target || '',
+                                           evidence: finding.evidence || '', ui_review_status: select.value })
+                });
+                if (!response.ok) throw new Error('Server did not save the review');
+                finding.ui_review_status = select.value;
+                review.querySelector('small').textContent = 'Review synced. Use Save session to keep an archive.';
+            } catch (_) {
+                reviewStates.set(key, finding.ui_review_status || 'Unreviewed');
+                select.value = finding.ui_review_status || 'Unreviewed';
+                review.querySelector('small').textContent = 'Review was not saved. Reconnect and try again.';
+            } finally { select.disabled = false; }
         });
         review.append(label, select, make('small', '', 'Use Save session to keep your review decisions.'));
         panel.append(review, make('p', 'finding-description', finding.description || 'No description provided.'));
@@ -89,6 +106,7 @@
             panel.append(group);
         }
         section('Evidence', finding.evidence, true);
+        section('Validation', finding.validation_basis || 'Security impact has not been verified.');
         if (Array.isArray(finding.verification_steps) && finding.verification_steps.length) {
             const group = make('section', 'finding-section');
             const list = make('ol');
@@ -100,21 +118,21 @@
         section('Recommendation', finding.recommendation || finding.remediation);
     }
 
-    function renderFindings(findings, total) {
+    function renderFindings(findings, total, view = 'confirmed') {
         const list = byId('vulnFindingsList');
         if (!list) return;
         list.replaceChildren();
-        if (!total) { reviewStates.clear(); selectedFinding = null; }
+        if (!total) { selectedFinding = null; }
         if (!findings.length) {
             const empty = make('div', 'sf-empty');
-            empty.append(make('strong', '', total ? 'No findings match this filter' : 'A clear view of your findings'), make('p', '', total ? 'Choose All to see the complete list.' : 'Analysis results will appear here, with evidence and review status.'));
+            empty.append(make('strong', '', total ? 'No findings match this filter' : view === 'confirmed' ? 'No confirmed vulnerabilities' : 'No observations to review'), make('p', '', total ? 'Choose All to see the complete list.' : view === 'confirmed' ? 'Automatic signals stay in Needs review until you confirm the evidence and impact.' : 'Scanner and AI observations will appear here without being counted as confirmed vulnerabilities.'));
             list.append(empty);
             renderFindingDetail(null);
             return;
         }
         findings.forEach(finding => {
             const key = findingKey(finding);
-            if (!reviewStates.has(key) && reviewOptions.includes(finding.ui_review_status)) reviewStates.set(key, finding.ui_review_status);
+            if (reviewOptions.includes(finding.ui_review_status)) reviewStates.set(key, finding.ui_review_status);
         });
         if (!findings.some(f => findingKey(f) === selectedFinding)) selectedFinding = findingKey(findings[0]);
         findings.forEach(finding => {
@@ -144,7 +162,20 @@
     function annotateFindings(findings) {
         return findings.map(finding => ({ ...finding, ui_review_status: reviewStates.get(findingKey(finding)) || (reviewOptions.includes(finding.ui_review_status) ? finding.ui_review_status : 'Unreviewed') }));
     }
-    window.SafiyeUI = { setSession, renderFindings, annotateFindings };
+    function showArchive(metadata) {
+        archiveMetadata = metadata;
+        setSession({ active: false });
+        if (byId('sessionTarget')) byId('sessionTarget').textContent = metadata.target_name || 'Loaded session';
+        if (byId('sessionPid')) byId('sessionPid').textContent = metadata.target_pid ? 'Saved PID ' + metadata.target_pid : 'PID —';
+        if (byId('sessionState')) byId('sessionState').textContent = 'Loaded';
+    }
+    function clearArchive() {
+        archiveMetadata = null;
+        reviewStates.clear();
+        setSession();
+        updateTarget();
+    }
+    window.SafiyeUI = { setSession, renderFindings, annotateFindings, showArchive, clearArchive };
 
     document.addEventListener('DOMContentLoaded', () => {
         const main = document.querySelector('.main-content');
