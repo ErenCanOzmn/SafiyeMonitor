@@ -246,6 +246,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Vulnerability findings state
     let allVulnFindings = [];
+    let allVulnObservations = [];
+    let findingView = "confirmed";
     let activeVulnFilter = "ALL";
 
     // AI analysis wait timer
@@ -1237,6 +1239,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // ── Session state management ──────────────────────────────────────────────
 
     function clearAllState() {
+        window.SafiyeUI?.clearArchive();
         // History table
         historyData = [];
         historyBySeq = {};
@@ -1258,6 +1261,13 @@ document.addEventListener("DOMContentLoaded", () => {
         sessionCapture.memoryStrings = [];
         sessionCapture.staticStrings = [];
         sessionCapture.cryptoEvents = [];
+        processEvents = [];
+        const processBody = document.getElementById("tblProcessesBody");
+        if (processBody) processBody.replaceChildren();
+        const processCount = document.getElementById("processCount");
+        if (processCount) processCount.textContent = "0 processes";
+        const fakerLog = document.getElementById("fakerHitLog");
+        if (fakerLog) fakerLog.replaceChildren();
 
         // Monitor tables
         [tblRegistry, tblFile, tblDll, tblMemory, tblStatic].forEach(t => {
@@ -1271,11 +1281,13 @@ document.addEventListener("DOMContentLoaded", () => {
         // Memory / Strings
         fullMemoryResults = [];
         fullStaticResults = [];
+        renderSecrets(null);
         if (memoryStatus) memoryStatus.textContent = "Click to scan process RAM for sensitive strings.";
         if (staticStatus)  staticStatus.textContent  = "Static analysis of hardcoded strings in the .exe file.";
 
         // Vulnerability findings
         allVulnFindings = [];
+        allVulnObservations = [];
         renderVulnFindings([]);
         const log = document.getElementById("vulnAnalysisLog");
         if (log) log.innerHTML = "";
@@ -1289,7 +1301,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function processMessage(m) {
-        if (m.type === "status") {
+        if (m.type === "session_loaded") {
+            window.SafiyeUI?.showArchive(m.metadata || {});
+        }
+        else if (m.type === "status") {
             statusText.textContent = m.message;
             const active = m.message === "Hook Active!";
             window.SafiyeUI?.setSession({ active, connected: true, targetPid: m.target_pid, targetName: m.target_name, startedAt: m.started_at });
@@ -1319,6 +1334,12 @@ document.addEventListener("DOMContentLoaded", () => {
             sessionCapture.staticStrings = fullStaticResults;
             staticStatus.textContent = `Found ${fullStaticResults.length} strings.`;
             renderStaticTable(fullStaticResults.slice(0, 500));
+        }
+        else if (m.type === "artifact_inventory") {
+            const metadata = m.metadata || {};
+            const data = { ...metadata, status: "ok", native: { ...metadata.native, findings: (m.data || []).filter(f => f.tier === "native") } };
+            if (metadata.managed) data.managed = { ...metadata.managed, findings: (m.data || []).filter(f => f.tier === "managed") };
+            renderSecrets(data);
         }
         else if (m.type === "static_strings_error") {
             if (staticStatus) staticStatus.textContent = m.message || "Static strings failed.";
@@ -1494,27 +1515,15 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         else if (m.type === "vuln_findings") {
             const findings = m.findings || [];
-            stopVulnTimer(`Analysis complete — ${findings.length} finding(s)`);
-            renderVulnFindings(findings);
+            stopVulnTimer(`Analysis complete — ${findings.length} confirmed, ${(m.observations || []).length} for review`);
+            renderVulnFindings(findings, m.observations || []);
         }
         else if (m.type === "vuln_analysis_log") {
             addVulnLog(m.message || "");
         }
         else if (m.type === "vulnerability_report") {
-            (m.vulnerabilities || []).forEach(v => {
-                const existing = allVulnFindings.find(f => f.title === v.title);
-                if (!existing) {
-                    allVulnFindings.unshift({
-                        severity: "HIGH",
-                        title: v.title || "Runtime Alert",
-                        description: v.description || "",
-                        evidence: `${v.evidence_method || ""}\n${v.evidence_data || ""}`.trim(),
-                        verification_steps: ["Verify with the Intercept tab — replay the captured packet.", "Check if exploitation is reproducible."],
-                        exploitation_notes: v.evidence_impact || ""
-                    });
-                }
-            });
-            renderVulnFindings(allVulnFindings);
+            // Old servers may emit this event; it must never bypass the review gate.
+            addVulnLog("Runtime signal received; confirmation requires evidence review.");
         }
         else if (m.type === "session_replay") {
             (m.events || []).forEach(ev => processMessage(ev));
@@ -1681,19 +1690,29 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function applyVulnFilter() {
+        const records = findingView === "confirmed" ? allVulnFindings : allVulnObservations;
         const filtered = activeVulnFilter === "ALL"
-            ? allVulnFindings
-            : allVulnFindings.filter(f => f.severity === activeVulnFilter);
-        window.SafiyeUI.renderFindings(filtered, allVulnFindings.length);
+            ? records
+            : records.filter(f => f.severity === activeVulnFilter);
+        window.SafiyeUI.renderFindings(filtered, records.length, findingView);
+        const confirmed = document.getElementById("btnConfirmedFindings");
+        const review = document.getElementById("btnReviewObservations");
+        if (confirmed) { confirmed.textContent = `Confirmed (${allVulnFindings.length})`; confirmed.setAttribute("aria-pressed", String(findingView === "confirmed")); }
+        if (review) { review.textContent = `Needs review (${allVulnObservations.length})`; review.setAttribute("aria-pressed", String(findingView === "review")); }
     }
 
-    function renderVulnFindings(findings) {
-        allVulnFindings = findings;
+    function renderVulnFindings(findings, observations = []) {
+        // Also protect the UI when replaying old or inconsistent events.
+        allVulnFindings = findings.filter(f => f.ui_review_status === "Confirmed" && f.validation_status === "confirmed");
+        allVulnObservations = [...observations, ...findings.filter(f => !allVulnFindings.includes(f))];
         updateVulnBadges();
         applyVulnFilter();
         const lastScan = document.getElementById("vulnLastScan");
         if (lastScan) lastScan.textContent = `Last scan: ${getTimeString()}`;
     }
+
+    document.getElementById("btnConfirmedFindings")?.addEventListener("click", () => { findingView = "confirmed"; applyVulnFilter(); });
+    document.getElementById("btnReviewObservations")?.addEventListener("click", () => { findingView = "review"; applyVulnFilter(); });
 
     // Filter buttons
     document.querySelectorAll(".vuln-filter-btn").forEach(btn => {
@@ -1903,30 +1922,21 @@ document.addEventListener("DOMContentLoaded", () => {
     if (btnAnalyzeAI) {
         btnAnalyzeAI.onclick = async () => {
             const total = sessionCapture.tcpPackets.length + sessionCapture.dllEvents.length +
-                          sessionCapture.registryEvents.length + sessionCapture.staticStrings.length +
-                          sessionCapture.memoryStrings.length + sessionCapture.cryptoEvents.length;
+                          sessionCapture.registryEvents.length + sessionCapture.fileEvents.length + sessionCapture.staticStrings.length +
+                          sessionCapture.memoryStrings.length + sessionCapture.cryptoEvents.length + processEvents.length;
             if (total === 0) {
                 addVulnLog("No data captured yet. Start the hook and generate some traffic first.");
                 return;
             }
             // Queue data in background
-            const payload = {
-                tcp_packets:     sessionCapture.tcpPackets.slice(-50).map(p => ({ direction: p.direction, dest: p.dest, size: p.size, body: (p.body||"").substring(0,1024), body_hex: (p.body_hex||"") })),
-                dll_events:      sessionCapture.dllEvents.slice(-100),
-                registry_events: sessionCapture.registryEvents.slice(-100),
-                file_events:     sessionCapture.fileEvents.slice(-100),
-                memory_strings:  sessionCapture.memoryStrings.slice(0,200).map(s => ({ type:s.type, val:s.val })),
-                static_strings:  sessionCapture.staticStrings.slice(0,200).map(s => ({ val:s.val })),
-                crypto_events:   sessionCapture.cryptoEvents.slice(-100).map(c => ({ api:c.api, op:c.op, size:c.size, body:(c.body||"").substring(0,512), dpapi_local_machine:c.dpapi_local_machine, dpapi_entropy:c.dpapi_entropy })),
-                process_events:  processEvents.slice(-100).map(p => ({ api:p.api, exe:p.exe, args:p.args, verb:p.verb, elevated:p.elevated, caller_mod:p.caller_mod }))
-            };
             fetch("/api/analyze_vulnerabilities", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload)
+                body: "{}"
             }).then(r => r.json()).then(result => {
                 if (result.status !== "error") startVulnTimer();
-            }).catch(() => {});
+                else addVulnLog("Could not prepare analysis: " + result.error);
+            }).catch(error => addVulnLog("Could not prepare analysis: " + error.message));
             // Show modal immediately
             openAiModal();
         };
@@ -1943,20 +1953,10 @@ document.addEventListener("DOMContentLoaded", () => {
             btnAnalyzeRules.disabled = true;
             btnAnalyzeRules.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 1s linear infinite;"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg> Scanning...`;
             try {
-                const payload = {
-                    tcp_packets:     sessionCapture.tcpPackets.slice(-50).map(p => ({ direction: p.direction, dest: p.dest, size: p.size, body: (p.body||"").substring(0,1024), body_hex: (p.body_hex||"") })),
-                    dll_events:      sessionCapture.dllEvents.slice(-100),
-                    registry_events: sessionCapture.registryEvents.slice(-100),
-                    file_events:     sessionCapture.fileEvents.slice(-100),
-                    memory_strings:  sessionCapture.memoryStrings.slice(0,200).map(s => ({ type:s.type, val:s.val })),
-                    static_strings:  sessionCapture.staticStrings.slice(0,200).map(s => ({ val:s.val })),
-                    crypto_events:   sessionCapture.cryptoEvents.slice(-100).map(c => ({ api:c.api, op:c.op, size:c.size, body:(c.body||"").substring(0,512), dpapi_local_machine:c.dpapi_local_machine, dpapi_entropy:c.dpapi_entropy })),
-                    process_events:  processEvents.slice(-100).map(p => ({ api:p.api, exe:p.exe, args:p.args, verb:p.verb, elevated:p.elevated, caller_mod:p.caller_mod }))
-                };
                 const resp = await fetch("/api/rule_scan", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(payload)
+                    body: "{}"
                 });
                 const result = await resp.json();
                 if (result.status === "error") addVulnLog(`Rule scan error: ${result.error}`);
@@ -2464,7 +2464,7 @@ document.addEventListener("DOMContentLoaded", () => {
         try {
             const r = await fetch("/api/vuln_add", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({findings, source: source||"scanner"})});
             const d = await r.json();
-            if (statusEl) statusEl.textContent = d.status==="ok" ? `Sent ${d.added} → Vulnerabilities (${d.total} total).` : ("Error: "+(d.message||""));
+            if (statusEl) statusEl.textContent = d.status==="ok" ? `Queued ${d.added} for review (${d.total} confirmed).` : ("Error: "+(d.message||""));
         } catch(e){ if(statusEl) statusEl.textContent="Send failed!"; console.error("send to vuln", e); }
     }
 
@@ -2590,10 +2590,14 @@ document.addEventListener("DOMContentLoaded", () => {
         const nf = native.findings || [];
         _secNativeRows(nf);
         const nmeta = document.getElementById("secretsNativeMeta");
-        if (nmeta) nmeta.textContent = data ? `— ${nf.length} finding(s), ${((native.scanned_bytes||0)/1048576).toFixed(1)}MB scanned${native.packed?" — packed binary, few strings":""}` : "";
+        if (nmeta) nmeta.textContent = data ? `— ${nf.length} inventory item(s), ${((native.scanned_bytes||0)/1048576).toFixed(1)}MB scanned${native.file_truncated || native.results_truncated ? " — partial scan (limit reached)" : ""}${native.packed?" — few readable strings":""}` : "";
         const managedSec = document.getElementById("secretsManagedSection");
         const managed = data && data.managed;
         const mf = (managed && managed.findings) || [];
+        const exportButton = document.getElementById("btnSecretsExport");
+        if (exportButton) exportButton.disabled = !(nf.length + mf.length);
+        const reviewButton = document.getElementById("btnSecretsToVuln");
+        if (reviewButton) reviewButton.disabled = !nf.some(f => f.validation_status === "needs_review") && !mf.some(f => f.value_available && f.validation_status === "needs_review");
         if (data && data.is_dotnet && managed) {
             if (managedSec) managedSec.style.display = "";
             _secManagedRows(mf);
@@ -2603,8 +2607,8 @@ document.addEventListener("DOMContentLoaded", () => {
         const meta = document.getElementById("secretsMeta");
         if (meta && data) {
             meta.textContent = data.is_dotnet
-                ? `.NET (${data.arch||""}) — native strings + reflection [${((managed&&managed.mode)||"safe").toUpperCase()}]. ${nf.length} native + ${mf.length} managed finding(s).`
-                : `Native binary (${data.arch||"non-.NET"}) — strings scan only, no target code run. ${nf.length} finding(s).`;
+                ? `.NET (${data.arch||""}) — native strings + reflection [${((managed&&managed.mode)||"safe").toUpperCase()}]. ${nf.length} native + ${mf.length} managed inventory items.`
+                : `Native binary (${data.arch||"non-.NET"}) — ${Object.entries(native.counts || {}).map(([kind, count]) => `${kind}: ${count}`).join(" · ") || `${nf.length} inventory items`}. No credential validity or vulnerability is assumed.`;
         }
     }
     const _btnSecretsScan = document.getElementById("btnSecretsScan");
@@ -2626,10 +2630,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (d.status!=="ok") { if(st) st.textContent = "Error: "+(d.message||"scan failed"); renderSecrets(null); return; }
                 renderSecrets(d);
                 const nc = (d.native&&d.native.count)||0, mc = (d.managed&&d.managed.count)||0;
-                if (st) st.textContent = d.is_dotnet ? `${nc} native + ${mc} managed finding(s).` : `${nc} native finding(s) (not .NET).`;
+                if (st) st.textContent = d.is_dotnet ? `${nc} native + ${mc} managed inventory items.` : `${nc} native inventory items (not .NET).`;
                 const any = (nc + mc) > 0;
                 const ex=document.getElementById("btnSecretsExport"); if(ex) ex.disabled=!any;
-                const tv=document.getElementById("btnSecretsToVuln"); if(tv) tv.disabled=!any;
+                const tv=document.getElementById("btnSecretsToVuln"); if(tv) tv.disabled=!(d.native?.findings || []).some(f => f.validation_status === "needs_review") && !(d.managed?.findings || []).some(f => f.value_available && f.validation_status === "needs_review");
             } catch(e){ if(st) st.textContent="Error!"; console.error("secret scan", e); }
             finally { _btnSecretsScan.disabled=false; }
         };
@@ -2646,21 +2650,21 @@ document.addEventListener("DOMContentLoaded", () => {
     const _btnSecretsToVuln = document.getElementById("btnSecretsToVuln");
     if (_btnSecretsToVuln) _btnSecretsToVuln.onclick = async () => {
         const out = [];
-        ((_secretsData&&_secretsData.native&&_secretsData.native.findings)||[]).forEach(f => out.push({
-            severity: f.severity||"MEDIUM",
-            title: `[Native Secret] ${f.category} @ ${f.section||("0x"+(f.offset||0).toString(16))}`,
-            description: `Embedded ${f.category} (${f.enc}, len ${f.length}) found in ${f.section||"binary"} at offset 0x${(f.offset||0).toString(16)}.`,
+        ((_secretsData&&_secretsData.native&&_secretsData.native.findings)||[]).filter(f => f.validation_status === "needs_review").forEach(f => out.push({
+            severity: "INFO",
+            title: `[Embedded candidate] ${f.category} @ 0x${(f.offset||0).toString(16)}`,
+            description: f.basis || "A labelled literal was extracted; credential validity and security impact are unverified.",
             evidence: `SHA-256: ${f.sha256||""}\nMasked: ${f.masked||""}`,
             verification_steps: ["Open the binary in a hex editor / disassembler at the offset and confirm the secret.", "Rotate the secret if it is live."],
-            exploitation_notes: "Hardcoded secret material can decrypt traffic, forge tokens, or authenticate as the app.",
+            exploitation_notes: "",
         }));
-        ((_secretsData&&_secretsData.managed&&_secretsData.managed.findings)||[]).forEach(f => out.push({
-            severity: f.severity||"MEDIUM",
+        ((_secretsData&&_secretsData.managed&&_secretsData.managed.findings)||[]).filter(f => f.value_available && f.validation_status === "needs_review").forEach(f => out.push({
+            severity: "INFO",
             title: `[Managed Secret] ${f.risk_label} — ${f.type}.${f.member}`,
             description: `Static ${f.kind} '${f.member}' (${f.value_type}, len ${f.length}) in ${f.type} looks like ${f.risk_label}.`,
             evidence: `SHA-256: ${f.sha256||""}\nMasked: ${f.masked_value||""}`,
             verification_steps: ["Open the assembly in dnSpy/ILSpy and inspect the member initializer.", "Correlate the SHA-256 with runtime crypto-boundary events if the process is hooked."],
-            exploitation_notes: "Embedded key/secret material can decrypt traffic, forge tokens, or authenticate as the app.",
+            exploitation_notes: "Validity and impact unverified; runtime static fields are not proof of hardcoding.",
         }));
         if (!out.length) return;
         await _sendToVuln(out, document.getElementById("secretsStatus"), "secret");
@@ -3262,16 +3266,22 @@ document.addEventListener("DOMContentLoaded", () => {
                 btnSaveHistory.textContent = "Saving...";
                 btnSaveHistory.disabled = true;
                 const resp = await fetch("/api/export_session");
+                if (!resp.ok) throw new Error(`Server returned HTTP ${resp.status}`);
                 const data = await resp.json();
                 data.vuln_findings = window.SafiyeUI.annotateFindings(data.vuln_findings || []);
+                data.vuln_observations = window.SafiyeUI.annotateFindings(data.vuln_observations || []);
+                Object.keys(data.vuln_sources || {}).forEach(source => {
+                    data.vuln_sources[source] = window.SafiyeUI.annotateFindings(data.vuln_sources[source]);
+                });
                 const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+                if (blob.size > 128 * 1024 * 1024) throw new Error("Session exceeds the 128 MiB archive limit.");
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
                 a.href = url;
                 const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
                 a.download = `safiye_session_${ts}.json`;
                 a.click();
-                URL.revokeObjectURL(url);
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
                 addVulnLog(`Session saved — ${data.session_events?.length || 0} events, ${data.vuln_findings?.length || 0} findings.`);
             } catch (e) {
                 alert("Save failed: " + e.message);
@@ -3292,6 +3302,7 @@ document.addEventListener("DOMContentLoaded", () => {
             try {
                 btnLoadHistory.textContent = "Loading...";
                 btnLoadHistory.disabled = true;
+                if (file.size > 128 * 1024 * 1024) throw new Error("Session exceeds the 128 MiB import limit.");
                 const text = await file.text();
                 const data = JSON.parse(text);
                 const resp = await fetch("/api/import_session", {
@@ -3300,7 +3311,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     body: JSON.stringify(data)
                 });
                 const result = await resp.json();
-                if (result.status === "error") {
+                if (!resp.ok || result.status === "error") {
                     alert("Load failed: " + result.error);
                 } else {
                     addVulnLog(`Session loaded from "${file.name}" — ${result.events} events, ${result.findings} findings.`);
